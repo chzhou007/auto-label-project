@@ -18,12 +18,12 @@ credentials:
   qwen_classifier:
     api_key_env: QWEN397B_API_KEY
     api_key: ${QWEN397B_API_KEY}
-    base_url: ${QWEN397B_API_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+    base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
 
   qwen_geometry_vlm:
     api_key_env: QWEN397B_API_KEY
     api_key: ${QWEN397B_API_KEY}
-    base_url: ${QWEN_GEOMETRY_API_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+    base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
 
   local_or_private_model:
     api_key_env: PRIVATE_MODEL_API_KEY
@@ -118,15 +118,15 @@ models:
     active_model: qwen397b_vlm_classifier
     candidates:
       qwen397b_vlm_classifier:
-        provider: dashscope_compatible
-        model_name: ${QWEN397B_MODEL:-qwen3.5-35b-a3b}
+        provider: openai_compatible
+        model_name: ${QWEN397B_MODEL:-qwen35b}
         model_version: null
         classifier_type: vlm
         classifier_name: qwen397b_vlm_classifier
         classifier_version: external
         prompt_version: classification_script_default
         credential_ref: qwen_classifier
-        base_url: ${QWEN397B_API_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+        base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
 
       private_vlm_classifier:
         provider: custom
@@ -146,10 +146,10 @@ models:
         service_type: vlm_detector
         backend: vlm_labelstudio_detector
         geometry_source: detector
-        model_name: ${QWEN_GEOMETRY_MODEL:-qwen-vl-max}
+        model_name: ${QWEN_GEOMETRY_MODEL:-qwen35b}
         model_version: vlm-pre-annotation-v1
         credential_ref: qwen_geometry_vlm
-        base_url: ${QWEN_GEOMETRY_API_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+        base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
         temperature: 0.0
         max_tokens: 2000
         prompt_version: person_labelstudio_bbox_v1

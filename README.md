@@ -96,13 +96,17 @@ cd D:\codex\auto_label_project
 python -m pip install -r requirements.txt
 ```
 
-设置大模型密钥。建议使用环境变量，不要把真实 key 写进仓库：
+设置大模型密钥。建议使用环境变量，不要把真实 key 写进仓库；你的服务地址需要填到 `/v1`，不要填到 `/v1/chat/completions`：
 
 ```powershell
+$env:QWEN397B_API_KEY="你的大模型 Key"
+$env:QWEN397B_API_URL="https://deepseek.gds-services.com/vllm-qwen35b/v1"
+$env:QWEN_GEOMETRY_API_URL="https://deepseek.gds-services.com/vllm-qwen35b/v1"
+$env:QWEN397B_MODEL="qwen35b"
+$env:QWEN_GEOMETRY_MODEL="qwen35b"
+
+# 只有运行 I2I 生成分支时才需要配置生成模型 key：
 $env:DASHSCOPE_API_KEY="你的 DashScope Key"
-$env:QWEN397B_API_KEY="你的分类大模型 Key"
-$env:QWEN397B_API_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
-$env:QWEN397B_MODEL="qwen3.5-35b-a3b"
 ```
 
 如需本地私有配置，可以复制：
@@ -131,7 +135,11 @@ credentials:
   qwen_classifier:
     api_key_env: QWEN397B_API_KEY
     api_key: ${QWEN397B_API_KEY}
-    base_url: ${QWEN397B_API_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+    base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+  qwen_geometry_vlm:
+    api_key_env: QWEN397B_API_KEY
+    api_key: ${QWEN397B_API_KEY}
+    base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
 
 paths:
   i2i_project: C:\Users\chang\Documents\数据标注\I2I
@@ -228,8 +236,10 @@ powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 -DryRunModels
 
 ```powershell
 $env:QWEN397B_API_KEY="你的 key"
-$env:QWEN_GEOMETRY_MODEL="qwen-vl-max"
-$env:QWEN397B_MODEL="qwen3.5-35b-a3b"
+$env:QWEN397B_API_URL="https://deepseek.gds-services.com/vllm-qwen35b/v1"
+$env:QWEN_GEOMETRY_API_URL="https://deepseek.gds-services.com/vllm-qwen35b/v1"
+$env:QWEN_GEOMETRY_MODEL="qwen35b"
+$env:QWEN397B_MODEL="qwen35b"
 
 powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 -BatchName batch_001
 ```
@@ -432,8 +442,9 @@ models:
         service_type: vlm_detector
         backend: vlm_labelstudio_detector
         geometry_source: detector
-        model_name: ${QWEN_GEOMETRY_MODEL:-qwen-vl-max}
+        model_name: ${QWEN_GEOMETRY_MODEL:-qwen35b}
         credential_ref: qwen_geometry_vlm
+        base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
         prompt_version: person_labelstudio_bbox_v1
 
 detector_services:
@@ -561,12 +572,12 @@ models:
     active_model: qwen397b_vlm_classifier
     candidates:
       qwen397b_vlm_classifier:
-        provider: dashscope_compatible
-        model_name: ${QWEN397B_MODEL:-qwen3.5-35b-a3b}
+        provider: openai_compatible
+        model_name: ${QWEN397B_MODEL:-qwen35b}
         classifier_type: vlm
         classifier_name: qwen397b_vlm_classifier
         credential_ref: qwen_classifier
-        base_url: ${QWEN397B_API_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+        base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
 
 classification:
   enabled: true

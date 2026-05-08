@@ -113,7 +113,7 @@ class ContractTests(unittest.TestCase):
         ]
         service = {
             "geometry_source": "detector",
-            "model_name": "qwen-vl-max",
+            "model_name": "qwen35b",
             "model_version": "vlm-pre-annotation-v1",
             "object_type_map": {"Person": "person"},
             "default_object_type": "person",
@@ -154,7 +154,7 @@ class ContractTests(unittest.TestCase):
         ]
         service = {
             "geometry_source": "detector",
-            "model_name": "qwen-vl-max",
+            "model_name": "qwen35b",
             "model_version": "vlm-pre-annotation-v1",
             "prompt_version": "person_labelstudio_bbox_v1",
             "object_type_map": {"Person": "person"},
@@ -182,7 +182,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(obj["object_id"], "person_000001")
         self.assertEqual(obj["object_type"], "person")
         self.assertEqual(obj["geometry_source"], "detector")
-        self.assertEqual(obj["geometry_model"]["model_name"], "qwen-vl-max")
+        self.assertEqual(obj["geometry_model"]["model_name"], "qwen35b")
         self.assertEqual(obj["geometry_model"]["model_version"], "vlm-pre-annotation-v1")
         self.assertEqual(obj["geometry_model"]["confidence"], 0.95)
         self.assertEqual(obj["geometry_detail"]["polygon"], None)
