@@ -267,6 +267,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 `
   -RawImages data/raw/images `
   -RawVideos data/raw/videos `
   -VideoFrameStride 30 `
+  -VideoDecodeMode cpu `
   -DryRunModels
 ```
 
@@ -289,6 +290,50 @@ data/raw/videos/
 ```powershell
 python scripts/run_preprocess.py --config configs/autolabel.yaml
 ```
+
+当前视频抽帧逻辑是按帧序号抽样，不是按秒抽样：`video_frame_stride=30` 表示保存第 `0, 30, 60, ...` 帧。理论抽帧数为：
+
+```text
+floor((视频总帧数 - 1) / video_frame_stride) + 1
+```
+
+例如 100 秒视频：
+
+```text
+30 fps: 100 * 30 = 3000 帧，stride=30 -> 100 张
+25 fps: 100 * 25 = 2500 帧，stride=30 -> 84 张
+60 fps: 100 * 60 = 6000 帧，stride=30 -> 200 张
+```
+
+偏差常见原因包括：视频真实 fps 不是标称 fps、可变帧率 VFR、首尾不足整秒、解码器丢帧或坏帧、`video_max_frames` 截断、以及 GPU/FFmpeg 后端与 OpenCV 后端对损坏帧/时间戳处理不同。
+
+预处理支持 CPU 和 GPU 两种模式，默认保留 CPU：
+
+```yaml
+preprocess:
+  video_decode_mode: cpu   # cpu / gpu / auto
+  ffmpeg_path: ffmpeg
+  video_gpu_hwaccel: cuda
+  video_gpu_fallback_to_cpu: true
+```
+
+命令行开启 GPU：
+
+```powershell
+python scripts/run_preprocess.py `
+  --config configs/autolabel.yaml `
+  --video-decode-mode gpu
+```
+
+一键脚本开启 GPU：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 `
+  -VideoDecodeMode gpu `
+  -VideoFrameStride 30
+```
+
+GPU 模式使用 FFmpeg `-hwaccel cuda` 解码；如果本机 FFmpeg 或显卡驱动不支持 CUDA，默认会回退 CPU。若希望 GPU 失败时直接报错，使用 `--no-video-gpu-fallback` 或 `-NoVideoGpuFallback`。
 
 预处理会生成图片待处理序列和 manifest：
 

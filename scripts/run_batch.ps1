@@ -6,6 +6,11 @@ param(
     [string]$RawVideos = "",
     [Nullable[int]]$VideoFrameStride = $null,
     [Nullable[int]]$VideoMaxFrames = $null,
+    [ValidateSet("cpu", "gpu", "auto")]
+    [string]$VideoDecodeMode = "",
+    [string]$FfmpegPath = "",
+    [string]$VideoGpuHwaccel = "",
+    [switch]$NoVideoGpuFallback,
     [switch]$DryRunModels,
     [switch]$DryRunGeometry,
     [switch]$DryRunClassification,
@@ -68,6 +73,18 @@ if ($null -ne $VideoFrameStride) {
 }
 if ($null -ne $VideoMaxFrames) {
     $PreprocessArgs += @("--video-max-frames", "$VideoMaxFrames")
+}
+if (-not [string]::IsNullOrWhiteSpace($VideoDecodeMode)) {
+    $PreprocessArgs += @("--video-decode-mode", $VideoDecodeMode)
+}
+if (-not [string]::IsNullOrWhiteSpace($FfmpegPath)) {
+    $PreprocessArgs += @("--ffmpeg-path", $FfmpegPath)
+}
+if (-not [string]::IsNullOrWhiteSpace($VideoGpuHwaccel)) {
+    $PreprocessArgs += @("--video-gpu-hwaccel", $VideoGpuHwaccel)
+}
+if ($NoVideoGpuFallback) {
+    $PreprocessArgs += "--no-video-gpu-fallback"
 }
 
 python @PreprocessArgs

@@ -46,7 +46,7 @@ SYSTEM_PROMPT = """你是一个严格的工业安全视觉识别专家，专门�
 11. using_phone: 玩手机。
 12. safety_goggles: 穿戴护目镜。
 
-输出必须是纯 JSON，不要 markdown，不要解释文字：
+输出必须是纯 JSON，不要 markdown，不要解释文字。你的输出第一个字符必须是 {，最后一个字符必须是 }：
 {
   "safety_harness": true,
   "hard_hat": false,
@@ -80,6 +80,8 @@ BOOLEAN_LABEL_MAP = {
     "using_phone": ("phone_usage", "using_phone", "not_using_phone"),
     "safety_goggles": ("safety_goggles", "wearing_safety_goggles", "no_safety_goggles"),
 }
+
+CLASSIFICATION_KEYS = tuple(BOOLEAN_LABEL_MAP.keys())
 
 
 def utc_now() -> str:
@@ -129,6 +131,56 @@ def parse_json_output(text: str, expected_type: type | tuple[type, ...] | None =
     raise json.JSONDecodeError("No JSON object or array found", value, 0)
 
 
+def _clean_note(value: str, limit: int = 180) -> str:
+    value = re.sub(r"[*_`#>-]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip(" :;,.")
+    if len(value) > limit:
+        return value[: limit - 3].rstrip() + "..."
+    return value
+
+
+def parse_boolean_text_output(text: str) -> dict[str, Any] | None:
+    """Fallback parser for VLMs that return prose instead of strict JSON."""
+    if not text:
+        return None
+    matches: list[tuple[int, str]] = []
+    lower_text = text.lower()
+    for key in CLASSIFICATION_KEYS:
+        pattern = rf"(?<![a-z0-9_]){re.escape(key)}(?![a-z0-9_])"
+        for match in re.finditer(pattern, lower_text):
+            matches.append((match.start(), key))
+    if not matches:
+        return None
+
+    matches.sort(key=lambda item: item[0])
+    parsed: dict[str, Any] = {"notes": {"_parser": "fallback_text_boolean_parser"}}
+    seen: set[str] = set()
+    for index, (start, key) in enumerate(matches):
+        if key in seen:
+            continue
+        end = matches[index + 1][0] if index + 1 < len(matches) else len(text)
+        segment = text[start:end]
+        bool_values = re.findall(r"\b(true|false)\b", segment, flags=re.I)
+        if not bool_values:
+            continue
+        parsed[key] = bool_values[-1].lower() == "true"
+        note = _clean_note(segment)
+        if note:
+            parsed["notes"][key] = note
+        seen.add(key)
+
+    if not seen:
+        return None
+
+    for key in CLASSIFICATION_KEYS:
+        if key not in parsed:
+            parsed[key] = False
+            parsed["notes"][key] = "fallback parser did not find an explicit value"
+    parsed["_parse_mode"] = "text_fallback"
+    parsed["_raw_text_preview"] = _clean_note(text, limit=500)
+    return parsed
+
+
 def process_image(image_path: str | Path, client: OpenAI) -> dict[str, Any]:
     print(f"  识别: {image_path}")
     raw_output = ""
@@ -155,6 +207,10 @@ def process_image(image_path: str | Path, client: OpenAI) -> dict[str, Any]:
             result["notes"] = {}
         return result
     except json.JSONDecodeError as exc:
+        fallback = parse_boolean_text_output(raw_output)
+        if fallback is not None:
+            print(f"  !! JSON 解析失败，已使用文本兜底解析: {exc}")
+            return fallback
         print(f"  !! JSON 解析失败: {exc}")
         print(f"  !! 原始返回前300字符: {raw_output.replace(chr(10), ' ')[:300]}")
         return {"error": "JSON decode error", "raw": raw_output}

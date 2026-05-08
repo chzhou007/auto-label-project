@@ -15,7 +15,11 @@
   "preprocess": {
     "copy_images": true,
     "video_frame_stride": 30,
-    "video_max_frames": null
+    "video_max_frames": null,
+    "video_decode_mode": "cpu",
+    "ffmpeg_path": "ffmpeg",
+    "video_gpu_hwaccel": "cuda",
+    "video_gpu_fallback_to_cpu": true
   },
   "direct_annotation": {
     "default_task_key": "ppe_person",

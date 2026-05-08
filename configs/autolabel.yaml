@@ -153,6 +153,8 @@ models:
         temperature: 0.0
         max_tokens: 2000
         prompt_version: person_labelstudio_bbox_v1
+        parse_retry_count: 1
+        fail_on_parse_error: false
         store_raw_response: false
 
       ppe_person_detector_http:
@@ -191,6 +193,11 @@ preprocess:
   copy_images: true
   video_frame_stride: 30
   video_max_frames: null
+  # cpu: OpenCV 逐帧解码；gpu: FFmpeg + -hwaccel；auto: 优先 GPU，失败回退 CPU。
+  video_decode_mode: cpu
+  ffmpeg_path: ffmpeg
+  video_gpu_hwaccel: cuda
+  video_gpu_fallback_to_cpu: true
   default_source_type: manual_upload
 
 generation:

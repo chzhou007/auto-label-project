@@ -17,6 +17,28 @@ PLACEHOLDER_IDS = {
     "id",
 }
 
+JSON_RETRY_PROMPT = """上一次输出不是合法 JSON。请重新分析同一张图，只输出下面这种 JSON 数组，不要解释、不要 markdown、不要自然语言：
+[
+  {
+    "data": {"image": "image.jpg"},
+    "predictions": [
+      {
+        "model_version": "vlm-pre-annotation-v1",
+        "score": 0.95,
+        "result": []
+      }
+    ]
+  }
+]
+如果没有检测到人员，必须输出 result 为空数组。"""
+
+
+def preview_text(text: str, limit: int = 300) -> str:
+    value = re.sub(r"\s+", " ", text or "").strip()
+    if len(value) > limit:
+        return value[: limit - 3].rstrip() + "..."
+    return value
+
 
 def strip_json_text(text: str) -> str:
     value = text.strip()
@@ -36,6 +58,26 @@ def strip_json_text(text: str) -> str:
 
 def parse_json_output(text: str) -> Any:
     return json.loads(strip_json_text(text))
+
+
+def parse_detector_payload(
+    text: str,
+    *,
+    fail_on_parse_error: bool = False,
+    log_error: bool = True,
+) -> Any | None:
+    try:
+        return parse_json_output(text)
+    except (ValueError, json.JSONDecodeError) as exc:
+        if fail_on_parse_error:
+            raise ValueError(
+                "VLM detector output does not contain parseable Label Studio JSON. "
+                f"Preview: {preview_text(text)}"
+            ) from exc
+        if log_error:
+            print(f"  !! VLM 检测 JSON 解析失败: {exc}")
+            print(f"  !! VLM 检测原始返回前300字符: {preview_text(text)}")
+        return None
 
 
 def percent_box_to_xyxy(value: dict[str, Any], width: int, height: int) -> dict[str, int | str]:
@@ -159,6 +201,40 @@ class VLMLabelStudioDetector:
             raise RuntimeError("VLM detector prompt is not configured.")
 
         client = OpenAI(api_key=api_key, base_url=base_url)
+        raw_text = self._request_json_text(client, model_name, image_url, prompt)
+        payload = parse_detector_payload(raw_text, log_error=False)
+        if payload is None:
+            retry_count = int(self.service.get("parse_retry_count", 1))
+            retry_prompt = self.service.get("json_retry_prompt") or JSON_RETRY_PROMPT
+            for attempt in range(1, retry_count + 1):
+                print(f"  !! VLM 检测输出非 JSON，正在重试 {attempt}/{retry_count}")
+                raw_text = self._request_json_text(client, model_name, image_url, retry_prompt)
+                payload = parse_detector_payload(raw_text, log_error=False)
+                if payload is not None:
+                    break
+
+        if payload is None:
+            if self.service.get("fail_on_parse_error", False):
+                parse_detector_payload(raw_text, fail_on_parse_error=True)
+            print("  !! VLM 检测 JSON 解析失败，已返回空框并继续处理后续样本")
+            print(f"  !! VLM 检测原始返回前300字符: {preview_text(raw_text)}")
+            return []
+
+        return labelstudio_payload_to_objects(
+            payload=payload,
+            image_uri=image_uri,
+            width=width,
+            height=height,
+            service=self.service,
+            raw_response=payload if self.service.get("store_raw_response", False) else None,
+        )
+
+    def _image_url(self, image_uri: str) -> str:
+        if image_uri.startswith("http://") or image_uri.startswith("https://") or image_uri.startswith("data:"):
+            return image_uri
+        return image_to_data_url(Path(image_uri))
+
+    def _request_json_text(self, client: Any, model_name: str, image_url: str, prompt: str) -> str:
         response = client.chat.completions.create(
             model=model_name,
             messages=[
@@ -166,7 +242,8 @@ class VLMLabelStudioDetector:
                     "role": "system",
                     "content": self.service.get(
                         "system_message",
-                        "You are a precise computer vision annotation engine. Return JSON only.",
+                        "You are a precise computer vision annotation engine. Return valid JSON only. "
+                        "Do not output prose, markdown, or explanations.",
                     ),
                 },
                 {
@@ -186,21 +263,7 @@ class VLMLabelStudioDetector:
             temperature=float(self.service.get("temperature", 0.0)),
             max_tokens=int(self.service.get("max_tokens", 2000)),
         )
-        raw_text = response.choices[0].message.content or ""
-        payload = parse_json_output(raw_text)
-        return labelstudio_payload_to_objects(
-            payload=payload,
-            image_uri=image_uri,
-            width=width,
-            height=height,
-            service=self.service,
-            raw_response=payload if self.service.get("store_raw_response", False) else None,
-        )
-
-    def _image_url(self, image_uri: str) -> str:
-        if image_uri.startswith("http://") or image_uri.startswith("https://") or image_uri.startswith("data:"):
-            return image_uri
-        return image_to_data_url(Path(image_uri))
+        return response.choices[0].message.content or ""
 
     def _detect_dry_run(self, image_uri: str) -> list[dict[str, Any]]:
         width, height = get_image_size(image_uri)

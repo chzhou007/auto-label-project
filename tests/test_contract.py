@@ -1,21 +1,38 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import unittest
 from pathlib import Path
 
 from autolabel.adapters.classification_script import labels_from_boolean_response
-from autolabel.adapters.vlm_labelstudio_detector import labelstudio_payload_to_objects, parse_json_output, percent_box_to_xyxy
+from autolabel.adapters.vlm_labelstudio_detector import (
+    labelstudio_payload_to_objects,
+    parse_detector_payload,
+    parse_json_output,
+    percent_box_to_xyxy,
+)
 from autolabel.config_loader import load_config
 from autolabel.contract_normalizer import normalize_autolabel_sample
 from autolabel.model_config import build_detector_runtime_config, resolve_classification_runtime, resolve_generation_runtime
 from autolabel.modules.classification.dry_run import DryRunClassificationModule
+from autolabel.preprocess import estimate_extracted_frame_count
 from autolabel.exporters.labelstudio import build_labelstudio_config, sample_to_labelstudio_task
 from autolabel.utils import read_json
 from autolabel.validators import validate_sample_contract
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_builtin_classification_module():
+    script_path = ROOT / "scripts" / "classification.py"
+    spec = importlib.util.spec_from_file_location("builtin_classification_for_test", script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load script: {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class ContractTests(unittest.TestCase):
@@ -52,6 +69,20 @@ class ContractTests(unittest.TestCase):
             labels,
         )
 
+    def test_builtin_classifier_parses_prose_boolean_output(self) -> None:
+        module = load_builtin_classification_module()
+        raw = """Based on the visual analysis:
+        1. **safety_harness**: No visible straps. (false)
+        2. **hard_hat**: The person is wearing a hard hat. -> true
+        3. **reflective_vest**: No reflective vest is visible. (false)
+        """
+        parsed = module.parse_boolean_text_output(raw)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["safety_harness"], False)
+        self.assertEqual(parsed["hard_hat"], True)
+        self.assertEqual(parsed["reflective_vest"], False)
+        self.assertEqual(parsed["_parse_mode"], "text_fallback")
+
     def test_labelstudio_export_shape(self) -> None:
         sample = read_json(ROOT / "schemas" / "autolabel_sample.example.json")
         task = sample_to_labelstudio_task(sample)
@@ -76,10 +107,17 @@ class ContractTests(unittest.TestCase):
         generation = resolve_generation_runtime(config)
         classification = resolve_classification_runtime(config)
         detector = build_detector_runtime_config(config)
+        preprocess = config["preprocess"]
         self.assertEqual(generation["vlm_model_name"], "aios-smart-eye-vlm")
         self.assertIn("model", classification)
         self.assertIn("model_profiles", detector)
         self.assertEqual(detector["services"]["ppe_person"]["model_ref"], "ppe_person_vlm_labelstudio_detector")
+        self.assertEqual(preprocess["video_decode_mode"], "cpu")
+
+    def test_video_frame_stride_count_estimate(self) -> None:
+        self.assertEqual(estimate_extracted_frame_count(3000, 30), 100)
+        self.assertEqual(estimate_extracted_frame_count(2500, 30), 84)
+        self.assertEqual(estimate_extracted_frame_count(3000, 30, max_frames=10), 10)
 
     def test_labelstudio_percent_box_converts_to_xyxy_pixels(self) -> None:
         box = percent_box_to_xyxy({"x": 10.0, "y": 20.0, "width": 30.0, "height": 40.0}, 1000, 500)
@@ -88,6 +126,9 @@ class ContractTests(unittest.TestCase):
     def test_vlm_json_parser_ignores_explanatory_suffix(self) -> None:
         payload = parse_json_output('结果如下：[{"predictions": [{"result": []}]}]\n说明文字')
         self.assertEqual(payload, [{"predictions": [{"result": []}]}])
+
+    def test_vlm_detector_parse_failure_can_return_none(self) -> None:
+        self.assertIsNone(parse_detector_payload("I found one person but cannot provide JSON.", log_error=False))
 
     def test_vlm_labelstudio_payload_maps_to_autolabel_objects(self) -> None:
         payload = [
