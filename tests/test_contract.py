@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from autolabel.adapters.classification_script import labels_from_boolean_response
-from autolabel.adapters.vlm_labelstudio_detector import labelstudio_payload_to_objects, percent_box_to_xyxy
+from autolabel.adapters.vlm_labelstudio_detector import labelstudio_payload_to_objects, parse_json_output, percent_box_to_xyxy
 from autolabel.config_loader import load_config
 from autolabel.contract_normalizer import normalize_autolabel_sample
 from autolabel.model_config import build_detector_runtime_config, resolve_classification_runtime, resolve_generation_runtime
@@ -76,7 +76,7 @@ class ContractTests(unittest.TestCase):
         generation = resolve_generation_runtime(config)
         classification = resolve_classification_runtime(config)
         detector = build_detector_runtime_config(config)
-        self.assertEqual(generation["vlm_model_name"], "qwen3.6-plus")
+        self.assertEqual(generation["vlm_model_name"], "aios-smart-eye-vlm")
         self.assertIn("model", classification)
         self.assertIn("model_profiles", detector)
         self.assertEqual(detector["services"]["ppe_person"]["model_ref"], "ppe_person_vlm_labelstudio_detector")
@@ -84,6 +84,10 @@ class ContractTests(unittest.TestCase):
     def test_labelstudio_percent_box_converts_to_xyxy_pixels(self) -> None:
         box = percent_box_to_xyxy({"x": 10.0, "y": 20.0, "width": 30.0, "height": 40.0}, 1000, 500)
         self.assertEqual(box, {"format": "xyxy", "x1": 100, "y1": 100, "x2": 400, "y2": 300})
+
+    def test_vlm_json_parser_ignores_explanatory_suffix(self) -> None:
+        payload = parse_json_output('结果如下：[{"predictions": [{"result": []}]}]\n说明文字')
+        self.assertEqual(payload, [{"predictions": [{"result": []}]}])
 
     def test_vlm_labelstudio_payload_maps_to_autolabel_objects(self) -> None:
         payload = [
@@ -113,7 +117,7 @@ class ContractTests(unittest.TestCase):
         ]
         service = {
             "geometry_source": "detector",
-            "model_name": "qwen35b",
+            "model_name": "aios-smart-eye-vlm",
             "model_version": "vlm-pre-annotation-v1",
             "object_type_map": {"Person": "person"},
             "default_object_type": "person",
@@ -154,7 +158,7 @@ class ContractTests(unittest.TestCase):
         ]
         service = {
             "geometry_source": "detector",
-            "model_name": "qwen35b",
+            "model_name": "aios-smart-eye-vlm",
             "model_version": "vlm-pre-annotation-v1",
             "prompt_version": "person_labelstudio_bbox_v1",
             "object_type_map": {"Person": "person"},
@@ -182,7 +186,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(obj["object_id"], "person_000001")
         self.assertEqual(obj["object_type"], "person")
         self.assertEqual(obj["geometry_source"], "detector")
-        self.assertEqual(obj["geometry_model"]["model_name"], "qwen35b")
+        self.assertEqual(obj["geometry_model"]["model_name"], "aios-smart-eye-vlm")
         self.assertEqual(obj["geometry_model"]["model_version"], "vlm-pre-annotation-v1")
         self.assertEqual(obj["geometry_model"]["confidence"], 0.95)
         self.assertEqual(obj["geometry_detail"]["polygon"], None)

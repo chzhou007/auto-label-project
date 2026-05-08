@@ -3,7 +3,7 @@
   "pipeline_version": "0.1.0",
   "paths": {
     "i2i_project": "C:\\Users\\chang\\Documents\\数据标注\\I2I",
-    "classification_script": "C:\\Users\\chang\\Documents\\数据标注\\classification.py",
+    "classification_script": "scripts/classification.py",
     "raw_images_dir": "data/raw/images",
     "raw_videos_dir": "data/raw/videos",
     "image_sequence_dir": "data/staging/image_sequence",
@@ -23,7 +23,7 @@
     "min_box_confidence": 0.0
   },
   "generation": {
-    "vlm_model": "qwen3.6-plus",
+    "vlm_model": "aios-smart-eye-vlm",
     "image_model": "wan2.7-image-pro",
     "grid_layout": "4x4",
     "edit_bbox_expand_ratio": 0.2,

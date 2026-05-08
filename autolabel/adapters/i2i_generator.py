@@ -23,7 +23,7 @@ class I2IGenerator:
         tasks_csv: str | Path,
         image_root: str | Path,
         output_root: str | Path,
-        vlm_model: str = "qwen3.6-plus",
+        vlm_model: str = "aios-smart-eye-vlm",
         image_model: str = "wan2.7-image-pro",
         grid_layout: str = "4x4",
         edit_bbox_expand_ratio: float = 0.20,

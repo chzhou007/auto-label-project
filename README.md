@@ -73,6 +73,7 @@ auto_label_project/
     autolabel_sample.example.json
 
   scripts/
+    classification.py            # 内置 AutoLabelSample 分类脚本
     run_preprocess.py
     run_i2i_generation.py
     run_direct_pipeline.py
@@ -102,8 +103,8 @@ python -m pip install -r requirements.txt
 $env:QWEN397B_API_KEY="你的大模型 Key"
 $env:QWEN397B_API_URL="https://deepseek.gds-services.com/vllm-qwen35b/v1"
 $env:QWEN_GEOMETRY_API_URL="https://deepseek.gds-services.com/vllm-qwen35b/v1"
-$env:QWEN397B_MODEL="qwen35b"
-$env:QWEN_GEOMETRY_MODEL="qwen35b"
+$env:QWEN397B_MODEL="aios-smart-eye-vlm"
+$env:QWEN_GEOMETRY_MODEL="aios-smart-eye-vlm"
 
 # 只有运行 I2I 生成分支时才需要配置生成模型 key：
 $env:DASHSCOPE_API_KEY="你的 DashScope Key"
@@ -143,7 +144,7 @@ credentials:
 
 paths:
   i2i_project: C:\Users\chang\Documents\数据标注\I2I
-  classification_script: C:\Users\chang\Documents\数据标注\classification.py
+  classification_script: scripts/classification.py
   raw_images_dir: data/raw/images
   raw_videos_dir: data/raw/videos
   image_sequence_manifest: data/staging/image_sequence/manifest.csv
@@ -161,7 +162,7 @@ modules:
     backend: external_script
     backends:
       external_script:
-        script_path: C:\Users\chang\Documents\数据标注\classification.py
+        script_path: scripts/classification.py
 
 models:
   generation:
@@ -238,8 +239,8 @@ powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 -DryRunModels
 $env:QWEN397B_API_KEY="你的 key"
 $env:QWEN397B_API_URL="https://deepseek.gds-services.com/vllm-qwen35b/v1"
 $env:QWEN_GEOMETRY_API_URL="https://deepseek.gds-services.com/vllm-qwen35b/v1"
-$env:QWEN_GEOMETRY_MODEL="qwen35b"
-$env:QWEN397B_MODEL="qwen35b"
+$env:QWEN_GEOMETRY_MODEL="aios-smart-eye-vlm"
+$env:QWEN397B_MODEL="aios-smart-eye-vlm"
 
 powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 -BatchName batch_001
 ```
@@ -442,7 +443,7 @@ models:
         service_type: vlm_detector
         backend: vlm_labelstudio_detector
         geometry_source: detector
-        model_name: ${QWEN_GEOMETRY_MODEL:-qwen35b}
+        model_name: ${QWEN_GEOMETRY_MODEL:-aios-smart-eye-vlm}
         credential_ref: qwen_geometry_vlm
         base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
         prompt_version: person_labelstudio_bbox_v1
@@ -557,11 +558,11 @@ detector_services:
 
 ## 11. 分类配置
 
-分类脚本路径在：
+分类脚本路径在。默认使用仓库内置脚本，它的输入/输出都是 `AutoLabelSample`，会把结果写回 `objects[].classification`：
 
 ```yaml
 paths:
-  classification_script: C:\Users\chang\Documents\数据标注\classification.py
+  classification_script: scripts/classification.py
 ```
 
 分类配置在：
@@ -573,7 +574,7 @@ models:
     candidates:
       qwen397b_vlm_classifier:
         provider: openai_compatible
-        model_name: ${QWEN397B_MODEL:-qwen35b}
+        model_name: ${QWEN397B_MODEL:-aios-smart-eye-vlm}
         classifier_type: vlm
         classifier_name: qwen397b_vlm_classifier
         credential_ref: qwen_classifier
@@ -590,7 +591,7 @@ classification:
 注意：
 
 - `generated` 来源会跳过分类。
-- 非生成图会使用 crop 调用 `classification.py`。
+- 非生成图会把完整 `AutoLabelSample` 传给 `classification.py`，脚本内部逐个读取 `objects[].crop.crop_uri` 分类。
 - 分类结果会写入 `objects[].classification.multi_labels`。
 - 要换分类大模型，新增 `models.classification.candidates` 条目并修改 `classification.model_key`。
 

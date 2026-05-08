@@ -32,7 +32,7 @@ credentials:
 
 paths:
   i2i_project: C:\Users\chang\Documents\数据标注\I2I
-  classification_script: C:\Users\chang\Documents\数据标注\classification.py
+  classification_script: scripts/classification.py
   raw_images_dir: data/raw/images
   raw_videos_dir: data/raw/videos
   image_sequence_dir: data/staging/image_sequence
@@ -58,7 +58,7 @@ modules:
     backend: external_script
     backends:
       external_script:
-        script_path: C:\Users\chang\Documents\数据标注\classification.py
+        script_path: scripts/classification.py
       dry_run_rule:
         labels:
           - label_key: helmet
@@ -79,7 +79,7 @@ models:
     vlm:
       qwen_grid_selector:
         provider: dashscope
-        model_name: qwen3.6-plus
+        model_name: aios-smart-eye-vlm
         model_version: null
         credential_ref: dashscope_generation
         api_key_env: DASHSCOPE_API_KEY
@@ -119,10 +119,10 @@ models:
     candidates:
       qwen397b_vlm_classifier:
         provider: openai_compatible
-        model_name: ${QWEN397B_MODEL:-qwen35b}
+        model_name: ${QWEN397B_MODEL:-aios-smart-eye-vlm}
         model_version: null
         classifier_type: vlm
-        classifier_name: qwen397b_vlm_classifier
+        classifier_name: aios-smart-eye-vlm
         classifier_version: external
         prompt_version: classification_script_default
         credential_ref: qwen_classifier
@@ -146,7 +146,7 @@ models:
         service_type: vlm_detector
         backend: vlm_labelstudio_detector
         geometry_source: detector
-        model_name: ${QWEN_GEOMETRY_MODEL:-qwen35b}
+        model_name: ${QWEN_GEOMETRY_MODEL:-aios-smart-eye-vlm}
         model_version: vlm-pre-annotation-v1
         credential_ref: qwen_geometry_vlm
         base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}

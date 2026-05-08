@@ -20,19 +20,18 @@ PLACEHOLDER_IDS = {
 
 def strip_json_text(text: str) -> str:
     value = text.strip()
-    if value.startswith("```json"):
-        value = value[7:]
-    if value.startswith("```"):
-        value = value[3:]
-    if value.endswith("```"):
-        value = value[:-3]
-    value = value.strip()
-    if value.startswith("[") or value.startswith("{"):
-        return value
-    match = re.search(r"(\[.*\]|\{.*\})", value, flags=re.S)
-    if not match:
-        raise ValueError("VLM detector output does not contain JSON.")
-    return match.group(1)
+    value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.I)
+    value = re.sub(r"\s*```$", "", value)
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(value):
+        if char not in "[{":
+            continue
+        try:
+            _, end = decoder.raw_decode(value[idx:])
+        except json.JSONDecodeError:
+            continue
+        return value[idx : idx + end].strip()
+    raise ValueError("VLM detector output does not contain JSON.")
 
 
 def parse_json_output(text: str) -> Any:

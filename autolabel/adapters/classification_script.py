@@ -127,6 +127,28 @@ class ClassificationScriptAdapter:
         if source_type in skip_source_types:
             return sample
 
+        sample_classifier = getattr(self.module, "classify_sample", None)
+        if callable(sample_classifier):
+            result = sample_classifier(
+                sample,
+                self.client,
+                skip_source_types=skip_source_types,
+                classifier_config={
+                    "classifier_type": self.classifier_type,
+                    "classifier_name": self.classifier_name,
+                    "classifier_version": self.classifier_version,
+                    "prompt_version": self.prompt_version,
+                    "model": self.model,
+                    "model_version": self.classifier_version,
+                    "delay_seconds": self.delay_seconds,
+                },
+                delay_seconds=self.delay_seconds,
+            )
+            if isinstance(result, dict):
+                return result
+            touch_workflow(sample, "classified")
+            return sample
+
         for obj in sample.get("objects", []):
             crop_uri = obj.get("crop", {}).get("crop_uri")
             if not crop_uri:
