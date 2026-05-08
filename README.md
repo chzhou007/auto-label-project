@@ -216,7 +216,50 @@ python scripts/run_pipeline.py --config configs/autolabel.yaml --branches export
 
 旧的 `run_i2i_generation.py`、`run_direct_pipeline.py` 仍保留，主要用于单步调试。
 
-## 6. 准备输入数据
+## 6. 一键批处理脚本
+
+如果要对 `data/raw/images/` 和 `data/raw/videos/` 中的一批数据直接跑人体框和分类，可以使用 PowerShell 一键脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 -DryRunModels
+```
+
+`-DryRunModels` 用于无 key 验证数据流，会生成模拟人体框和模拟分类结果。配置真实大模型 key 后，去掉 `-DryRunModels` 即可调用真实 VLM 检测与分类：
+
+```powershell
+$env:QWEN397B_API_KEY="你的 key"
+$env:QWEN_GEOMETRY_MODEL="qwen-vl-max"
+$env:QWEN397B_MODEL="qwen3.5-35b-a3b"
+
+powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 -BatchName batch_001
+```
+
+默认输出到：
+
+```text
+data/runs/<batch_name>/
+  manifest.csv
+  image_sequence/
+  processed/
+    metadata/
+    crops/
+  exports/
+    labelstudio_import.json
+    labelstudio_config.xml
+```
+
+常用参数：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 `
+  -BatchName batch_001 `
+  -RawImages data/raw/images `
+  -RawVideos data/raw/videos `
+  -VideoFrameStride 30 `
+  -DryRunModels
+```
+
+## 7. 准备输入数据
 
 把原始图片放到：
 
@@ -257,7 +300,7 @@ sample_002,img_002,data/staging/image_sequence/img_002.jpg,generated,generation,
 - `task_key`：直接标注任务使用，对应 `detector_services.services` 下的 key。
 - `anomaly_type`：生成任务使用，例如 `diesel_leak`、`oil_leak`、`coolant_leak`。
 
-## 7. 图像生成分支
+## 8. 图像生成分支
 
 图像生成分支使用外部代码：
 
@@ -308,7 +351,7 @@ python scripts/run_i2i_generation.py `
   --ingest-metadata-dir data/processed/metadata
 ```
 
-## 8. 直接标注分支
+## 9. 直接标注分支
 
 直接标注分支会执行：
 
@@ -338,7 +381,7 @@ data/processed/metadata/
 data/processed/crops/
 ```
 
-## 9. 检测/分割模型配置
+## 10. 检测/分割模型配置
 
 检测/分割模型分两层配置：`models.geometry.candidates` 维护可选模型，`detector_services.services` 维护任务路由。
 
@@ -501,7 +544,7 @@ detector_services:
 
 本地命令需要写出 `{output_json}`，或直接在 stdout 输出 JSON。
 
-## 10. 分类配置
+## 11. 分类配置
 
 分类脚本路径在：
 
@@ -540,7 +583,7 @@ classification:
 - 分类结果会写入 `objects[].classification.multi_labels`。
 - 要换分类大模型，新增 `models.classification.candidates` 条目并修改 `classification.model_key`。
 
-## 11. 主输出结构
+## 12. 主输出结构
 
 主输出不是 crop，也不是 Label Studio 结果，而是完整的 `AutoLabelSample`：
 
@@ -576,7 +619,7 @@ export
 
 写出 metadata 前，代码会调用 `normalize_autolabel_sample()` 补齐默认字段，再调用 `validate_sample_contract()` 校验结构。
 
-## 12. 校验 metadata
+## 13. 校验 metadata
 
 校验单个文件：
 
@@ -602,7 +645,7 @@ schemas/autolabel_sample.schema.json
 schemas/autolabel_sample.example.json
 ```
 
-## 13. 导出 Label Studio
+## 14. 导出 Label Studio
 
 导出命令：
 
@@ -622,7 +665,7 @@ data/exports/labelstudio/import.json
 python scripts/export_labelstudio.py --config configs/autolabel.yaml --update-samples
 ```
 
-## 14. 测试
+## 15. 测试
 
 运行基础测试：
 
@@ -636,7 +679,7 @@ python -m unittest discover -s tests
 python -m compileall autolabel scripts tests
 ```
 
-## 15. 常见问题
+## 16. 常见问题
 
 ### 1. YAML 无法读取
 
