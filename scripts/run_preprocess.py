@@ -24,6 +24,7 @@ def main() -> int:
     parser.add_argument("--ffmpeg-path", default=None)
     parser.add_argument("--video-gpu-hwaccel", default=None)
     parser.add_argument("--no-video-gpu-fallback", action="store_true")
+    parser.add_argument("--video-error-policy", choices=["fail", "skip"], default=None)
     parser.add_argument("--no-copy-images", action="store_true")
     args = parser.parse_args()
 
@@ -45,6 +46,7 @@ def main() -> int:
         video_gpu_fallback_to_cpu=(
             False if args.no_video_gpu_fallback else bool(preprocess.get("video_gpu_fallback_to_cpu", True))
         ),
+        video_error_policy=args.video_error_policy or preprocess.get("video_error_policy", "fail"),
         default_source_type=preprocess.get("default_source_type", "manual_upload"),
     )
     manifest = args.manifest or paths.get("image_sequence_manifest", "data/staging/image_sequence/manifest.csv")

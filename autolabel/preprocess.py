@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -49,6 +50,38 @@ def _copy_image_to_sequence(image_path: Path, output_dir: Path, copy_images: boo
             shutil.copy2(image_path, target)
         return target
     return image_path
+
+
+def resolve_ffmpeg_path(ffmpeg_path: str = "ffmpeg") -> str:
+    """Resolve ffmpeg executable from PATH or common WinGet install locations."""
+    candidate = Path(ffmpeg_path)
+    if candidate.is_file():
+        return str(candidate)
+
+    resolved = shutil.which(ffmpeg_path)
+    if resolved:
+        return resolved
+
+    if ffmpeg_path.lower() not in {"ffmpeg", "ffmpeg.exe"}:
+        return ffmpeg_path
+
+    search_roots: list[Path] = []
+    local_app_data = os.getenv("LOCALAPPDATA")
+    if local_app_data:
+        search_roots.append(Path(local_app_data) / "Microsoft" / "WinGet" / "Packages")
+    search_roots.append(Path.home() / "AppData" / "Local" / "Microsoft" / "WinGet" / "Packages")
+
+    for root in search_roots:
+        if not root.exists():
+            continue
+        matches = sorted(root.glob("Gyan.FFmpeg*/*/bin/ffmpeg.exe"), reverse=True)
+        if matches:
+            return str(matches[0])
+        matches = sorted(root.glob("**/ffmpeg.exe"), reverse=True)
+        if matches:
+            return str(matches[0])
+
+    return ffmpeg_path
 
 
 def estimate_extracted_frame_count(
@@ -124,7 +157,7 @@ def _extract_video_frames_gpu_ffmpeg(
         tmp_path = Path(tmpdir)
         pattern = tmp_path / "frame_%06d.jpg"
         command = [
-            ffmpeg_path,
+            resolve_ffmpeg_path(ffmpeg_path),
             "-hide_banner",
             "-loglevel",
             "error",
@@ -144,9 +177,16 @@ def _extract_video_frames_gpu_ffmpeg(
             command += ["-frames:v", str(max_frames)]
         command.append(str(pattern))
 
-        completed = subprocess.run(command, text=True, capture_output=True, check=False)
+        completed = subprocess.run(
+            command,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
         if completed.returncode != 0:
-            detail = completed.stderr.strip() or completed.stdout.strip()
+            detail = (completed.stderr or "").strip() or (completed.stdout or "").strip()
             raise RuntimeError(f"FFmpeg GPU frame extraction failed: {detail}")
 
         written: list[Path] = []
@@ -200,10 +240,14 @@ def preprocess_raw_assets(
     ffmpeg_path: str = "ffmpeg",
     video_gpu_hwaccel: str = "cuda",
     video_gpu_fallback_to_cpu: bool = True,
+    video_error_policy: str = "fail",
     default_source_type: str = "manual_upload",
 ) -> list[dict[str, Any]]:
     output = Path(output_dir)
     rows: list[dict[str, Any]] = []
+    error_policy = (video_error_policy or "fail").lower()
+    if error_policy not in {"fail", "skip"}:
+        raise ValueError("video_error_policy must be one of: fail, skip")
 
     for image_path in _iter_files(raw_images, IMAGE_SUFFIXES):
         sequence_path = _copy_image_to_sequence(image_path, output, copy_images)
@@ -226,16 +270,24 @@ def preprocess_raw_assets(
 
     for video_path in _iter_files(raw_videos, VIDEO_SUFFIXES):
         frame_dir = output / slugify(video_path.stem)
-        for frame_path in _extract_video_frames(
-            video_path=video_path,
-            output_dir=frame_dir,
-            frame_stride=video_frame_stride,
-            max_frames=video_max_frames,
-            decode_mode=video_decode_mode,
-            ffmpeg_path=ffmpeg_path,
-            gpu_hwaccel=video_gpu_hwaccel,
-            gpu_fallback_to_cpu=video_gpu_fallback_to_cpu,
-        ):
+        try:
+            frame_paths = _extract_video_frames(
+                video_path=video_path,
+                output_dir=frame_dir,
+                frame_stride=video_frame_stride,
+                max_frames=video_max_frames,
+                decode_mode=video_decode_mode,
+                ffmpeg_path=ffmpeg_path,
+                gpu_hwaccel=video_gpu_hwaccel,
+                gpu_fallback_to_cpu=video_gpu_fallback_to_cpu,
+            )
+        except Exception as exc:
+            if error_policy == "skip":
+                print(f"  !! 跳过无法解析视频: {video_path} ({exc})")
+                continue
+            raise
+
+        for frame_path in frame_paths:
             width, height = get_image_size(frame_path)
             image_id = slugify(frame_path.stem)
             rows.append(

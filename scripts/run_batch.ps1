@@ -11,6 +11,8 @@ param(
     [string]$FfmpegPath = "",
     [string]$VideoGpuHwaccel = "",
     [switch]$NoVideoGpuFallback,
+    [ValidateSet("fail", "skip")]
+    [string]$VideoErrorPolicy = "",
     [switch]$DryRunModels,
     [switch]$DryRunGeometry,
     [switch]$DryRunClassification,
@@ -85,6 +87,9 @@ if (-not [string]::IsNullOrWhiteSpace($VideoGpuHwaccel)) {
 }
 if ($NoVideoGpuFallback) {
     $PreprocessArgs += "--no-video-gpu-fallback"
+}
+if (-not [string]::IsNullOrWhiteSpace($VideoErrorPolicy)) {
+    $PreprocessArgs += @("--video-error-policy", $VideoErrorPolicy)
 }
 
 python @PreprocessArgs

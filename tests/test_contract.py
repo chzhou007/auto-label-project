@@ -113,6 +113,7 @@ class ContractTests(unittest.TestCase):
         self.assertIn("model_profiles", detector)
         self.assertEqual(detector["services"]["ppe_person"]["model_ref"], "ppe_person_vlm_labelstudio_detector")
         self.assertEqual(preprocess["video_decode_mode"], "cpu")
+        self.assertEqual(preprocess["video_error_policy"], "skip")
 
     def test_video_frame_stride_count_estimate(self) -> None:
         self.assertEqual(estimate_extracted_frame_count(3000, 30), 100)

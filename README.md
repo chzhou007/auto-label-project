@@ -315,6 +315,7 @@ preprocess:
   ffmpeg_path: ffmpeg
   video_gpu_hwaccel: cuda
   video_gpu_fallback_to_cpu: true
+  video_error_policy: skip  # skip / fail
 ```
 
 命令行开启 GPU：
@@ -334,6 +335,16 @@ powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 `
 ```
 
 GPU 模式使用 FFmpeg `-hwaccel cuda` 解码；如果本机 FFmpeg 或显卡驱动不支持 CUDA，默认会回退 CPU。若希望 GPU 失败时直接报错，使用 `--no-video-gpu-fallback` 或 `-NoVideoGpuFallback`。
+
+若某个视频本身损坏、为空文件，或 FFmpeg/OpenCV 都无法打开，`video_error_policy: skip` 会跳过该视频并继续处理其他文件；如果希望发现坏视频就中断批处理，改为 `fail` 或命令行传：
+
+```powershell
+python scripts/run_preprocess.py `
+  --config configs/autolabel.yaml `
+  --video-error-policy fail
+```
+
+`moov atom not found` 通常表示 MP4 文件损坏、未完整拷贝，或文件大小为 0。
 
 预处理会生成图片待处理序列和 manifest：
 

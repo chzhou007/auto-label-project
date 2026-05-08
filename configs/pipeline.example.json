@@ -19,7 +19,8 @@
     "video_decode_mode": "cpu",
     "ffmpeg_path": "ffmpeg",
     "video_gpu_hwaccel": "cuda",
-    "video_gpu_fallback_to_cpu": true
+    "video_gpu_fallback_to_cpu": true,
+    "video_error_policy": "skip"
   },
   "direct_annotation": {
     "default_task_key": "ppe_person",

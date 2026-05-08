@@ -198,6 +198,8 @@ preprocess:
   ffmpeg_path: ffmpeg
   video_gpu_hwaccel: cuda
   video_gpu_fallback_to_cpu: true
+  # fail: 任一坏视频中断；skip: 跳过坏视频并继续生成 manifest。
+  video_error_policy: skip
   default_source_type: manual_upload
 
 generation:
