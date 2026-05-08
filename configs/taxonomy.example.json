@@ -1,0 +1,55 @@
+{
+  "object_types": [
+    "person",
+    "equipment",
+    "fire_extinguisher",
+    "ground_area",
+    "yellow_black_line",
+    "pipe",
+    "support",
+    "cable",
+    "leakage_area"
+  ],
+  "label_dimensions": {
+    "helmet": [
+      "wearing_helmet",
+      "no_helmet",
+      "unknown"
+    ],
+    "reflective_vest": [
+      "wearing_reflective_vest",
+      "no_reflective_vest",
+      "unknown"
+    ],
+    "safety_belt": [
+      "wearing_safety_belt",
+      "no_safety_belt",
+      "unknown"
+    ],
+    "smoking": [
+      "smoking",
+      "not_smoking",
+      "unknown"
+    ],
+    "sleeping": [
+      "sleeping",
+      "not_sleeping",
+      "unknown"
+    ],
+    "falling": [
+      "falling",
+      "not_falling",
+      "unknown"
+    ],
+    "phone_usage": [
+      "using_phone",
+      "not_using_phone",
+      "unknown"
+    ],
+    "anomaly_type": [
+      "diesel_leak",
+      "oil_leak",
+      "coolant_leak"
+    ]
+  }
+}

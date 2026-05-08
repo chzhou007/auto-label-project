@@ -1,0 +1,750 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local/autolabel_sample.schema.json",
+  "title": "AutoLabelSample",
+  "type": "object",
+  "required": [
+    "sample_id",
+    "image_asset",
+    "objects",
+    "workflow",
+    "export"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "sample_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "自动化标注样本唯一ID，用于串联大图、框、小图、分类结果、抽检结果和导出结果"
+    },
+    "image_asset": {
+      "$ref": "#/$defs/image_asset"
+    },
+    "objects": {
+      "type": "array",
+      "description": "大图中的目标对象列表。每个object代表一个框，以及由该框裁剪得到的小图和分类结果",
+      "items": {
+        "$ref": "#/$defs/object_item"
+      }
+    },
+    "qc_policy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/qc_policy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "workflow": {
+      "$ref": "#/$defs/workflow"
+    },
+    "export": {
+      "$ref": "#/$defs/export"
+    }
+  },
+  "$defs": {
+    "image_asset": {
+      "type": "object",
+      "required": [
+        "image_id",
+        "image_uri",
+        "width",
+        "height",
+        "source_type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "image_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "原始大图唯一ID"
+        },
+        "image_uri": {
+          "type": "string",
+          "minLength": 1,
+          "description": "原始大图文件路径或访问地址"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "原图宽度，单位为像素"
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "原图高度，单位为像素"
+        },
+        "source_type": {
+          "type": "string",
+          "enum": [
+            "generated",
+            "human_staged",
+            "cctv",
+            "robot_dog",
+            "manual_upload"
+          ],
+          "description": "数据来源类型"
+        },
+        "source_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/source_context"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "scene_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/scene_context"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "source_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generation_prompt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "generation_model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "collection_batch": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "camera_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "capture_time": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        }
+      }
+    },
+    "scene_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "site": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "building": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "floor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "room_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "room_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "task_group": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "inspection_content": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "object_item": {
+      "type": "object",
+      "required": [
+        "object_id",
+        "object_type",
+        "box",
+        "geometry_source",
+        "crop",
+        "classification"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "object_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "object_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "box": {
+          "$ref": "#/$defs/xyxy_box"
+        },
+        "geometry_source": {
+          "type": "string",
+          "enum": [
+            "detector",
+            "segmentation_model",
+            "synthetic_generator",
+            "human_annotation"
+          ]
+        },
+        "geometry_model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/geometry_model"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "geometry_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/geometry_detail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "crop": {
+          "$ref": "#/$defs/crop"
+        },
+        "classification": {
+          "$ref": "#/$defs/classification"
+        },
+        "quality_check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/quality_check"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "xyxy_box": {
+      "type": "object",
+      "required": [
+        "format",
+        "x1",
+        "y1",
+        "x2",
+        "y2"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "const": "xyxy",
+          "default": "xyxy"
+        },
+        "x1": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "y1": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "x2": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "y2": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "geometry_model": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "model_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "default": null
+        }
+      }
+    },
+    "geometry_detail": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "polygon": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "default": null
+        },
+        "mask_uri": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mask_format": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "png",
+            "rle",
+            "coco_rle",
+            null
+          ],
+          "default": null
+        },
+        "generation_params": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "crop": {
+      "type": "object",
+      "required": [
+        "crop_id",
+        "crop_uri"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "crop_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "crop_uri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "crop_box": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/xyxy_box"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "crop_expand_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "default": null
+        },
+        "is_valid_crop": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "classification": {
+      "type": "object",
+      "required": [
+        "multi_labels"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "multi_labels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/classification_label"
+          }
+        },
+        "classifier_type": {
+          "type": "string",
+          "enum": [
+            "vlm",
+            "classifier",
+            "rule",
+            "human"
+          ],
+          "default": "vlm"
+        },
+        "classifier_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "classifier_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "prompt_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "raw_response": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "classification_label": {
+      "type": "object",
+      "required": [
+        "label_key",
+        "label_value"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "label_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label_value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "default": null
+        },
+        "evidence": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "quality_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "qc_sampled": {
+          "type": "boolean",
+          "default": true
+        },
+        "qc_status": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "pending",
+            "passed",
+            "failed",
+            "corrected",
+            "discarded",
+            null
+          ],
+          "default": null
+        },
+        "reviewed_labels": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/reviewed_label"
+          },
+          "default": null
+        },
+        "issue_flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "reviewer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "review_time": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "comment": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "reviewed_label": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label_key": {
+          "type": "string"
+        },
+        "label_value": {
+          "type": "string"
+        }
+      }
+    },
+    "qc_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "qc_mode": {
+          "type": "string",
+          "enum": [
+            "none",
+            "sampling",
+            "full_inspection"
+          ],
+          "default": "sampling"
+        },
+        "sampling_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "default": null
+        },
+        "sampling_method": {
+          "type": "string",
+          "enum": [
+            "random",
+            "stratified",
+            "risk_based"
+          ],
+          "default": "random"
+        },
+        "fail_policy": {
+          "type": "string",
+          "enum": [
+            "pass_only_sample",
+            "batch_rework",
+            "relabel_failed_only"
+          ],
+          "default": "batch_rework"
+        },
+        "qc_batch_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "required": [
+        "workflow_status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "workflow_status": {
+          "type": "string",
+          "enum": [
+            "raw",
+            "boxed",
+            "cropped",
+            "classified",
+            "sampling_selected",
+            "qc_in_progress",
+            "qc_completed",
+            "export_ready",
+            "exported",
+            "discarded"
+          ]
+        },
+        "pipeline_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "pipeline_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "created_time": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "updated_time": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        }
+      }
+    },
+    "export": {
+      "type": "object",
+      "required": [
+        "export_format",
+        "export_status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "export_format": {
+          "type": "string",
+          "enum": [
+            "labelstudio",
+            "coco",
+            "yolo",
+            "custom"
+          ]
+        },
+        "export_status": {
+          "type": "string",
+          "enum": [
+            "not_exported",
+            "exported",
+            "failed"
+          ]
+        },
+        "export_uri": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "labelstudio_mapping": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    }
+  }
+}

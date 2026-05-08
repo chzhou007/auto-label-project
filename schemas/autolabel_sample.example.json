@@ -1,0 +1,106 @@
+{
+  "sample_id": "sample_direct_000001",
+  "image_asset": {
+    "image_id": "img_direct_000001",
+    "image_uri": "data/staging/image_sequence/img_direct_000001.jpg",
+    "width": 1920,
+    "height": 1080,
+    "source_type": "manual_upload",
+    "source_context": {
+      "generation_prompt": null,
+      "generation_model": null,
+      "collection_batch": "batch_001",
+      "camera_id": null,
+      "capture_time": null
+    },
+    "scene_context": {
+      "site": "园区A",
+      "building": "1号楼",
+      "floor": "B1",
+      "room_name": "配电室",
+      "room_type": "配电室",
+      "task_group": "PPE",
+      "inspection_content": "人员安全穿戴"
+    }
+  },
+  "objects": [
+    {
+      "object_id": "obj_000001",
+      "object_type": "person",
+      "box": {
+        "format": "xyxy",
+        "x1": 320,
+        "y1": 180,
+        "x2": 640,
+        "y2": 920
+      },
+      "geometry_source": "detector",
+      "geometry_model": {
+        "model_name": "replace_with_detector_name",
+        "model_version": "v1.0",
+        "confidence": 0.92
+      },
+      "geometry_detail": {
+        "polygon": null,
+        "mask_uri": null,
+        "mask_format": null,
+        "generation_params": null
+      },
+      "crop": {
+        "crop_id": "sample_direct_000001_obj_000001",
+        "crop_uri": "data/processed/crops/sample_direct_000001_obj_000001.jpg",
+        "crop_box": {
+          "format": "xyxy",
+          "x1": 304,
+          "y1": 143,
+          "x2": 656,
+          "y2": 957
+        },
+        "crop_expand_ratio": 0.05,
+        "is_valid_crop": true
+      },
+      "classification": {
+        "multi_labels": [
+          {
+            "label_key": "helmet",
+            "label_value": "wearing_helmet",
+            "confidence": null,
+            "evidence": "vlm classification"
+          },
+          {
+            "label_key": "reflective_vest",
+            "label_value": "no_reflective_vest",
+            "confidence": null,
+            "evidence": "vlm classification"
+          }
+        ],
+        "classifier_type": "vlm",
+        "classifier_name": "classification.py",
+        "classifier_version": "external",
+        "prompt_version": "classification_script_default",
+        "raw_response": null
+      },
+      "quality_check": null
+    }
+  ],
+  "qc_policy": {
+    "qc_mode": "sampling",
+    "sampling_ratio": 0.08,
+    "sampling_method": "random",
+    "fail_policy": "batch_rework",
+    "qc_batch_id": null
+  },
+  "workflow": {
+    "workflow_status": "classified",
+    "pipeline_id": "autolabel_dag_v1",
+    "pipeline_version": "0.1.0",
+    "created_time": "2026-05-08T10:00:00+08:00",
+    "updated_time": "2026-05-08T10:00:00+08:00"
+  },
+  "export": {
+    "export_format": "labelstudio",
+    "export_status": "not_exported",
+    "export_uri": null,
+    "labelstudio_mapping": null
+  }
+}
