@@ -147,7 +147,7 @@ models:
         backend: vlm_labelstudio_detector
         geometry_source: detector
         model_name: ${QWEN_GEOMETRY_MODEL:-aios-smart-eye-vlm}
-        model_version: vlm-pre-annotation-v1
+        model_version: vlm-pre-annotation-v2
         credential_ref: qwen_geometry_vlm
         base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
         temperature: 0.0
@@ -155,13 +155,13 @@ models:
         request_image_max_side: 1280
         coordinate_units: auto
         auto_detect_coordinate_units: true
-        use_response_format: true
+        use_response_format: false
         response_format_type: json_object
         system_message: |
           You are a strict JSON API for computer-vision annotation.
-          Return only one valid JSON object.
-          Do not output analysis, thinking process, explanations, markdown, bullet points, or any text outside JSON.
-        prompt_version: person_labelstudio_full_body_bbox_v2
+          Return only valid JSON that exactly follows the user's schema template.
+          Do not output analysis, thinking process, explanations, markdown, bullet points, JSON comments, or any text outside JSON.
+        prompt_version: person_labelstudio_full_body_bbox_v3
         parse_retry_count: 0
         fail_on_parse_error: true
         store_raw_response: false
@@ -227,36 +227,38 @@ direct_annotation:
   default_task_key: ppe_person
   crop_expand_ratio: 0.05
   min_box_confidence: 0.0
-  min_box_width: 4
-  min_box_height: 4
-  min_box_area: 16
-  max_box_aspect_ratio: 20.0
+  min_box_width: 12
+  min_box_height: 24
+  min_box_area: 300
+  max_box_aspect_ratio: 8.0
   cleanup_existing_crops: true
   batch_size: 1
   workers: 1
   json_retry_attempts: 3
-  # 可选复核：VLM 出框 -> crop -> 再问 VLM crop 是否包含完整可见人体。
-  # 默认关闭；打开后，复核不通过会写入 objects[].quality_check，不会跳过后续分类。
+  # 可选复核：VLM 出框 -> crop -> 再问 VLM crop 是否包含人体。
+  # 打开后，非人体 crop 会被删除；有人但不完整的 crop 会保留并写入 objects[].quality_check。
   crop_review:
-    enabled: false
+    enabled: true
     model_ref: ppe_person_vlm_labelstudio_detector
     target_object_type: person
     reviewer: vlm_crop_reviewer
     prompt_version: crop_full_person_review_v1
     failed_issue_flag: incomplete_person_crop
     record_passed: false
+    drop_failed: true
+    drop_incomplete_person: false
     use_response_format: true
     response_format_type: json_object
     max_tokens: 600
     prompt: |
-      你是一个严格的工业安全数据质检员。请检查这张人体检测框裁剪图（crop）是否包含一个完整可见的人体。
+      你是一个严格的工业安全数据质检员。请检查这张人体检测框裁剪图（crop）是否包含可见人体，以及这个 crop 是否完整覆盖了该人体在原场景中的可见范围。
 
       判定规则：
-      1. crop 中必须能看到清晰的人体主体。
-      2. 如果头部在 crop 边缘被截断，判定为不通过。
-      3. 如果脚部或鞋子在 crop 边缘被截断，判定为不通过。
-      4. 如果人体明显偏离 crop，或 crop 只包含背景、柜体、设备、地面，判定为不通过。
-      5. 如果人体只是被原场景中的设备、栏杆或其他物体遮挡，但 crop 边界没有额外截断人体，可判定为通过。
+      1. 如果 crop 只包含背景、柜体、门板、设备、地面、黑边、墙面、管线或纹理，没有任何人体部位，contains_person 必须为 false。
+      2. 如果 crop 中能看到头、躯干、四肢、手、脚、衣服轮廓等任意明确人体部位，contains_person 为 true。
+      3. 如果 crop 边界把头部、脚部、躯干或主要肢体额外截断，is_complete_visible_person 为 false。
+      4. 如果人体只是被原场景中的设备、栏杆或其他物体遮挡，但 crop 边界没有额外截断人体，is_complete_visible_person 可为 true。
+      5. 不要把柜门缝、地砖边缘、机柜黑边、阴影、地面纹理误判成人。
 
       只输出一个合法 JSON object，不要 markdown，不要解释文字。输出第一个字符必须是 {，最后一个字符必须是 }：
       {
@@ -301,74 +303,59 @@ detector_services:
         当前任务需要识别的目标是：人员 (Person)。
         (注：如果有多个人员重叠或部分遮挡，请尽可能分别标注出每一个可见个体的轮廓。)
 
-        # Full Visible Person Box Rules
-        你的边界框必须框住【画面中可见的人体完整范围】，而不是只框住头部、上半身、躯干或腿部中段。
-        如果一个人只露出局部身体，也必须标注这个人的所有可见身体范围；不要因为脚部、头部或部分身体不可见就漏标这个人。
-        1. 如果头部可见，框的上边界必须从头顶、头发或安全帽的最高可见点开始。
-        2. 如果脚部或鞋子可见，框的下边界必须覆盖到脚底、鞋底或脚尖的最低可见点。
-        3. 只要画面中存在可见脚部/鞋子，就不要把框截断在膝盖、小腿、脚踝上方或鞋子上方。
-        4. 如果脚部被画面边缘裁掉、被遮挡物遮挡、或确实不可见，允许输出半身/局部人体框；此时框的下边界应覆盖到该人体在画面中的最低可见身体部位。
-        5. 如果手臂、背包、安全帽、反光衣、鞋子等属于该人员身体或穿戴物的可见部分，也应包含在同一个 Person 框内。
-        6. 不要把影子、地面空白、大面积背景算入人体框，但宁可轻微外扩 2%-5%，也不要漏掉脚、鞋、手臂或头部。
-
-        # Box Self-check Before Output
-        在输出每个 Person 框之前，请逐一自检：
-        - 这个框是否从该人的最高可见点覆盖到最低可见点？
-        - 如果脚/鞋可见，框底部是否已经到达脚底/鞋底/脚尖？
-        - 是否错误地把完整站立人员标成了半身框？
-        - 是否漏掉了伸出的手臂、头盔、鞋子或其他穿戴物？
-        只有通过上述检查后，才输出该框。
+        # Annotation Rules (重要标注规则)
+        在确定目标的边界框时，必须严格遵循以下优先级原则：
+        1. **最高优先级（完整到脚）**：边界框必须尽最大可能包含完整的全身，**特别是边界框的底部（底边）必须延伸并完整包含人物的脚部/鞋子**
+        2. **次高优先级（可见部分最大化）**：如果人物下半身被遮挡（如被机柜、设备挡住）或因图像边缘截断导致脚部不可见，则**优先尽可能完整地框选当前所有可见的人体部分**。
 
         # Coordinate Rules (Label Studio Standard)
-        Label Studio 要求的边界框坐标必须是基于图像宽高的**百分比 (0.0 - 100.0)**，绝对不要输出像素坐标：
+        Label Studio 要求的边界框坐标必须是基于图像宽高的**百分比 (0.0 - 100.0)**，而不是绝对像素值：
         1. `x`: 边界框左上角 X 坐标占图像总宽度的百分比。
         2. `y`: 边界框左上角 Y 坐标占图像总高度的百分比。
         3. `width`: 边界框宽度占图像总宽度的百分比。
         4. `height`: 边界框高度占图像总高度的百分比。
-        5. 所有 `x`、`y`、`width`、`height` 数值都必须落在 0.0 到 100.0 之间。
-        6. 如果你先估计出了像素坐标，必须先换算成百分比再输出：x = pixel_x / image_width * 100，y = pixel_y / image_height * 100。
-        7. 不要输出 `x1/y1/x2/y2`，不要输出像素单位，不要输出大于 100 的坐标值。
 
         # Output Format constraints
         1. 你的输出必须是合法的、可解析的 JSON 格式。
         2. 绝对不要输出任何 JSON 代码块之外的解释性文字、问候语或 Markdown 标记（如 ```json）。
-        3. 绝对不要输出 Thinking Process、分析步骤、编号列表或自然语言解释。
-        4. 输出顶层必须是一个 JSON object，不能是数组。
-        5. 如果图中没有发现目标，请输出包含空 predictions 的结构（`"result": []`）。
+        3. 如果图中没有发现目标，请输出包含空 predictions 的结构（`"result": []`）。
 
         # JSON Schema Template
         请严格将你的识别结果填入以下结构中：
 
-        {
-          "data": {
-            "image": "image.jpg"
-          },
-          "predictions": [
-            {
-              "model_version": "vlm-pre-annotation-v1",
-              "score": 0.95,
-              "result": [
-                {
-                  "id": "自动生成的唯一ID",
-                  "type": "rectanglelabels",
-                  "from_name": "label",
-                  "to_name": "image",
-                  "image_rotation": 0,
-                  "value": {
-                    "rotation": 0,
-                    "x": 0.0,
-                    "y": 0.0,
-                    "width": 0.0,
-                    "height": 0.0,
-                    "rectanglelabels": [
-                      "Person"
-                    ]
+        [
+          {
+            "data": {
+              "image": "image.jpg"
+            },
+            "predictions": [
+              {
+                "model_version": "vlm-pre-annotation-v2",
+                "score": 0.95,
+                "result": [
+                  // 在此处循环插入每个目标的标注数据
+                  {
+                    "id": "自动生成的唯一ID",
+                    "type": "rectanglelabels",
+                    "from_name": "label",
+                    "to_name": "image",
+                    "image_rotation": 0,
+                    "value": {
+                      "rotation": 0,
+                      "x": 0.0, // 替换为计算出的百分比
+                      "y": 0.0, // 替换为计算出的百分比
+                      "width": 0.0, // 替换为计算出的百分比
+                      "height": 0.0, // 替换为计算出的百分比
+                      "rectanglelabels": [
+                        "Person" // 替换为对应的标签名
+                      ]
+                    }
                   }
-                }
-              ]
-            }
-          ]
-        }
+                ]
+              }
+            ]
+          }
+        ]
       request:
         image_field: image_uri
         extra_payload:

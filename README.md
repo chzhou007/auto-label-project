@@ -500,10 +500,10 @@ VLM 有时会输出极小框或零宽高框，坐标转换层为了满足 `xyxy`
 ```yaml
 direct_annotation:
   min_box_confidence: 0.0
-  min_box_width: 4
-  min_box_height: 4
-  min_box_area: 16
-  max_box_aspect_ratio: 20.0
+  min_box_width: 12
+  min_box_height: 24
+  min_box_area: 300
+  max_box_aspect_ratio: 8.0
   cleanup_existing_crops: true
 ```
 
@@ -512,7 +512,7 @@ direct_annotation:
 - `max_box_aspect_ratio`：过滤极端细长框，避免 Qwen/Qwen-VL 图像预处理在 `smart_resize` 阶段因为长宽比过大报错。
 - `cleanup_existing_crops: true`：重跑同一个 `sample_id` 时，会先删除该样本旧的 crop 文件，再写入本轮有效 crop，避免历史 `1x1` 脏图残留。
 
-如果你确实需要保留极远处的小人，可以把这些阈值调小，例如 `min_box_width: 2`、`min_box_height: 2`、`min_box_area: 4`。
+如果你确实需要保留极远处的小人，可以把这些阈值调小，例如 `min_box_width: 4`、`min_box_height: 8`、`min_box_area: 32`。
 
 ## 10. 检测/分割模型配置
 
@@ -571,9 +571,9 @@ models:
         request_image_max_side: 1280
         coordinate_units: auto
         auto_detect_coordinate_units: true
-        use_response_format: true
+        use_response_format: false
         response_format_type: json_object
-        prompt_version: person_labelstudio_full_body_bbox_v2
+        prompt_version: person_labelstudio_full_body_bbox_v3
         parse_retry_count: 0
         fail_on_parse_error: true
 
@@ -639,7 +639,7 @@ auto_detect_coordinate_units: true
 
 如果发现人体框在场景图里位置大致正确，但裁剪图经常漏掉头部、脚部或只截到半身，可以打开 crop 复核开关。该功能会在 `crop` 之后、`classification` 之前，再把每个 `person` crop 交给 VLM 判断是否包含完整可见人体。
 
-默认关闭：
+如需关闭 crop 复核，可以显式改为：
 
 ```yaml
 direct_annotation:
@@ -647,7 +647,7 @@ direct_annotation:
     enabled: false
 ```
 
-开启方式：
+当前主配置默认开启，并删除明确不含人体的 crop：
 
 ```yaml
 direct_annotation:
@@ -658,9 +658,11 @@ direct_annotation:
     prompt_version: crop_full_person_review_v1
     failed_issue_flag: incomplete_person_crop
     record_passed: false
+    drop_failed: true
+    drop_incomplete_person: false
 ```
 
-复核不通过时，pipeline 不会直接丢弃样本，而是写回对象级质检字段，便于后续筛选和回看：
+`drop_failed: true` 只会删除 `contains_person=false` 的非人体 crop，例如柜门、地面、设备边缘、黑边等。`drop_incomplete_person: false` 表示有人但不完整时保留该对象，并写回对象级质检字段，便于后续筛选和回看：
 
 ```json
 {

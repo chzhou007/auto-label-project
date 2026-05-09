@@ -9,7 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autolabel.adapters.classification_script import labels_from_boolean_response
-from autolabel.adapters.crop_reviewer import apply_crop_review_result, build_crop_review_config, parse_review_payload
+from autolabel.adapters.crop_reviewer import (
+    VLMCropReviewer,
+    apply_crop_review_result,
+    build_crop_review_config,
+    parse_review_payload,
+)
 from autolabel.adapters.vlm_labelstudio_detector import (
     labelstudio_value_to_xyxy,
     labelstudio_payload_to_objects,
@@ -148,7 +153,15 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(detector["services"]["ppe_person"]["model_ref"], "ppe_person_vlm_labelstudio_detector")
         self.assertEqual(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["parse_retry_count"], 0)
         self.assertTrue(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["fail_on_parse_error"])
-        self.assertTrue(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["use_response_format"])
+        self.assertFalse(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["use_response_format"])
+        self.assertEqual(
+            detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["model_version"],
+            "vlm-pre-annotation-v2",
+        )
+        self.assertEqual(
+            detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["prompt_version"],
+            "person_labelstudio_full_body_bbox_v3",
+        )
         self.assertEqual(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["request_image_max_side"], 1280)
         self.assertEqual(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["coordinate_units"], "auto")
         self.assertTrue(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["auto_detect_coordinate_units"])
@@ -169,14 +182,17 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(direct["batch_size"], 1)
         self.assertEqual(direct["workers"], 1)
         self.assertEqual(direct["json_retry_attempts"], 3)
-        self.assertEqual(direct["min_box_width"], 4)
-        self.assertEqual(direct["min_box_height"], 4)
-        self.assertEqual(direct["min_box_area"], 16)
-        self.assertEqual(direct["max_box_aspect_ratio"], 20.0)
+        self.assertEqual(direct["min_box_width"], 12)
+        self.assertEqual(direct["min_box_height"], 24)
+        self.assertEqual(direct["min_box_area"], 300)
+        self.assertEqual(direct["max_box_aspect_ratio"], 8.0)
         self.assertTrue(direct["cleanup_existing_crops"])
-        self.assertFalse(direct["crop_review"]["enabled"])
+        self.assertTrue(direct["crop_review"]["enabled"])
         self.assertEqual(direct["crop_review"]["model_ref"], "ppe_person_vlm_labelstudio_detector")
-        self.assertEqual(build_crop_review_config(config, detector), {"enabled": False})
+        review_config = build_crop_review_config(config, detector)
+        self.assertTrue(review_config["enabled"])
+        self.assertTrue(review_config["drop_failed"])
+        self.assertFalse(review_config["drop_incomplete_person"])
 
     def test_crop_review_config_uses_detector_model_profile(self) -> None:
         config = deepcopy(load_config(ROOT / "configs" / "autolabel.yaml"))
@@ -213,6 +229,37 @@ class ContractTests(unittest.TestCase):
         self.assertIn("missing_feet", quality_check["issue_flags"])
         self.assertEqual(quality_check["reviewer"], "vlm_crop_reviewer")
         self.assertIn("脚部被 crop 截断", quality_check["comment"])
+
+    def test_crop_review_can_drop_no_person_objects(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crop_path = Path(tmp) / "sample_person_false.jpg"
+            Image.new("RGB", (40, 120), color=(0, 0, 0)).save(crop_path)
+            sample = {
+                "sample_id": "sample_crop_review_drop",
+                "objects": [
+                    {
+                        "object_id": "person_false",
+                        "object_type": "person",
+                        "crop": {"crop_uri": str(crop_path)},
+                    }
+                ],
+            }
+            reviewer = VLMCropReviewer({"drop_failed": True})
+            with patch.object(
+                reviewer,
+                "review_crop",
+                return_value={
+                    "contains_person": False,
+                    "is_complete_visible_person": False,
+                    "missing_parts": [],
+                    "reason": "只有柜门",
+                },
+            ):
+                reviewer.review_sample(sample)
+            self.assertEqual(sample["objects"], [])
+            self.assertFalse(crop_path.exists())
 
     def test_crop_review_parser_reads_json_object_from_response(self) -> None:
         parsed = parse_review_payload(

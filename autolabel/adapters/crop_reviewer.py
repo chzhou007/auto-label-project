@@ -8,14 +8,14 @@ from ..utils import image_to_data_url, now_iso_shanghai
 from .vlm_labelstudio_detector import VLMJsonParseError, bool_config, preview_text
 
 
-DEFAULT_CROP_REVIEW_PROMPT = """你是一个严格的工业安全数据质检员。请检查这张人体检测框裁剪图（crop）是否包含一个完整可见的人体。
+DEFAULT_CROP_REVIEW_PROMPT = """你是一个严格的工业安全数据质检员。请检查这张人体检测框裁剪图（crop）是否包含可见人体，以及这个 crop 是否完整覆盖了该人体在原场景中的可见范围。
 
 判定规则：
-1. crop 中必须能看到清晰的人体主体。
-2. 如果头部在 crop 边缘被截断，判定为不通过。
-3. 如果脚部或鞋子在 crop 边缘被截断，判定为不通过。
-4. 如果人体明显偏离 crop，或 crop 只包含背景、柜体、设备、地面，判定为不通过。
-5. 如果人体只是被原场景中的设备、栏杆或其他物体遮挡，但 crop 边界没有额外截断人体，可判定为通过。
+1. 如果 crop 只包含背景、柜体、门板、设备、地面、黑边、墙面、管线或纹理，没有任何人体部位，contains_person 必须为 false。
+2. 如果 crop 中能看到头、躯干、四肢、手、脚、衣服轮廓等任意明确人体部位，contains_person 为 true。
+3. 如果 crop 边界把头部、脚部、躯干或主要肢体额外截断，is_complete_visible_person 为 false。
+4. 如果人体只是被原场景中的设备、栏杆或其他物体遮挡，但 crop 边界没有额外截断人体，is_complete_visible_person 可为 true。
+5. 不要把柜门缝、地砖边缘、机柜黑边、阴影、地面纹理误判成人。
 
 只输出一个合法 JSON object，不要 markdown，不要解释文字：
 {
@@ -82,6 +82,8 @@ def build_crop_review_config(
     merged.setdefault("prompt_version", "crop_full_person_review_v1")
     merged.setdefault("failed_issue_flag", "incomplete_person_crop")
     merged.setdefault("record_passed", False)
+    merged.setdefault("drop_failed", False)
+    merged.setdefault("drop_incomplete_person", False)
     merged.setdefault("use_response_format", True)
     merged.setdefault("response_format_type", "json_object")
     if "max_tokens" not in review_cfg:
@@ -119,6 +121,17 @@ def apply_crop_review_result(
     }
 
 
+def should_drop_reviewed_object(result: dict[str, Any], review_cfg: dict[str, Any]) -> bool:
+    if not bool_config(review_cfg.get("drop_failed"), default=False):
+        return False
+    contains_person = bool(result.get("contains_person"))
+    if not contains_person:
+        return True
+    if bool_config(review_cfg.get("drop_incomplete_person"), default=False):
+        return not bool(result.get("is_complete_visible_person"))
+    return False
+
+
 def review_comment(result: dict[str, Any], review_cfg: dict[str, Any]) -> str:
     reason = str(result.get("reason") or "").strip()
     prompt_version = review_cfg.get("prompt_version", "crop_full_person_review_v1")
@@ -148,14 +161,33 @@ class VLMCropReviewer:
 
     def review_sample(self, sample: dict[str, Any]) -> None:
         target_object_type = self.review_cfg.get("target_object_type", "person")
+        kept_objects = []
+        dropped = 0
         for obj in sample.get("objects", []):
             if target_object_type and obj.get("object_type") != target_object_type:
+                kept_objects.append(obj)
                 continue
             crop_uri = obj.get("crop", {}).get("crop_uri")
             if not crop_uri:
+                kept_objects.append(obj)
                 continue
             result = self.review_crop(crop_uri)
             apply_crop_review_result(obj, result, self.review_cfg)
+            if should_drop_reviewed_object(result, self.review_cfg):
+                dropped += 1
+                self._remove_crop_file(crop_uri)
+                continue
+            kept_objects.append(obj)
+        if dropped:
+            print(f"  !! {sample.get('sample_id')} crop 复核删除 {dropped} 个非人体对象")
+        sample["objects"] = kept_objects
+
+    def _remove_crop_file(self, crop_uri: str) -> None:
+        from pathlib import Path
+
+        path = Path(crop_uri)
+        if path.exists() and path.is_file():
+            path.unlink()
 
     def review_crop(self, crop_uri: str) -> dict[str, Any]:
         if self.review_cfg.get("dry_run"):
