@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .adapters.classification_script import ClassificationJsonParseError
+from .adapters.crop_reviewer import VLMCropReviewer, build_crop_review_config
 from .adapters.detector_service import DetectorServiceClient
 from .adapters.vlm_labelstudio_detector import VLMJsonParseError
 from .adapters.i2i_generator import load_generated_samples
@@ -14,7 +15,7 @@ from .contract_normalizer import normalize_autolabel_sample
 from .cropper import attach_crops
 from .modules.classification import build_classification_module
 from .sample_factory import make_sample, touch_workflow
-from .utils import get_image_size, read_csv, read_json, write_json
+from .utils import get_image_size, read_csv, write_json
 from .validators import validate_sample_contract
 
 
@@ -63,13 +64,13 @@ def run_direct_pipeline(
     rows = [row for row in read_csv(manifest_csv) if (row.get("task_mode") or "direct") == "direct"]
     direct_cfg = pipeline_config.get("direct_annotation", {})
     classification_cfg = pipeline_config.get("classification", {})
+    crop_review_cfg = build_crop_review_config(pipeline_config, detector_config)
     batch_size = _positive_int(batch_size if batch_size is not None else direct_cfg.get("batch_size"), 1)
     workers = _positive_int(workers if workers is not None else direct_cfg.get("workers"), 1)
     json_retry_attempts = _positive_int(direct_cfg.get("json_retry_attempts"), 3)
     output = Path(output_root)
     metadata_dir = output / "metadata"
     crop_dir = output / "crops"
-    retry_failure_dir = output / "retry_failures"
     thread_state = threading.local()
 
     def detector() -> DetectorServiceClient:
@@ -86,6 +87,15 @@ def run_direct_pipeline(
         if module is None:
             module = build_classification_module(pipeline_config)
             thread_state.classifier = module
+        return module
+
+    def crop_reviewer() -> VLMCropReviewer | None:
+        if not crop_review_cfg.get("enabled"):
+            return None
+        module = getattr(thread_state, "crop_reviewer", None)
+        if module is None:
+            module = VLMCropReviewer(crop_review_cfg)
+            thread_state.crop_reviewer = module
         return module
 
     def make_base_sample(row: dict[str, Any], workflow_status: str = "raw") -> dict[str, Any]:
@@ -114,6 +124,10 @@ def run_direct_pipeline(
         attach_crops(sample, crop_dir, float(direct_cfg.get("crop_expand_ratio", 0.0)))
         touch_workflow(sample, "cropped")
 
+        reviewer = crop_reviewer()
+        if reviewer is not None:
+            reviewer.review_sample(sample)
+
         classifier_module = classifier()
         if classifier_module is not None:
             skip_source_types = set(classification_cfg.get("skip_source_types", ["generated"]))
@@ -133,38 +147,22 @@ def run_direct_pipeline(
         write_json(output_path, sample)
         return output_path
 
-    def write_discarded_row(row: dict[str, Any], attempt: int, exc: Exception) -> Path:
-        sample = make_base_sample(row, workflow_status="discarded")
-        sample = normalize_autolabel_sample(
-            sample,
-            pipeline_id=pipeline_config.get("pipeline_id"),
-            pipeline_version=pipeline_config.get("pipeline_version"),
-            qc_policy=pipeline_config.get("qc_policy"),
-            export_config=pipeline_config.get("export"),
-        )
-        validate_sample_contract(sample)
-
-        output_path = metadata_dir / f"{sample['sample_id']}.json"
-        write_json(output_path, sample)
-        write_json(
-            retry_failure_dir / f"{sample['sample_id']}.json",
-            {
-                "sample_id": sample["sample_id"],
-                "image_uri": sample["image_asset"]["image_uri"],
-                "workflow_status": "discarded",
-                "reason": "model_json_parse_error",
-                "attempts": attempt,
-                "error_type": exc.__class__.__name__,
-                "error": str(exc),
-            },
-        )
-        return output_path
-
     def handle_row(row: dict[str, Any], attempt: int) -> tuple[str, Path | None, dict[str, Any], int, Exception | None]:
         try:
             return "ok", process_row(row), row, attempt, None
         except MODEL_JSON_PARSE_ERRORS as exc:
             return "json_error", None, row, attempt, exc
+
+    def remove_stale_retry_outputs(row: dict[str, Any]) -> None:
+        sample_id = row.get("sample_id")
+        if not sample_id:
+            return
+        for path in (
+            metadata_dir / f"{sample_id}.json",
+            output / "retry_failures" / f"{sample_id}.json",
+        ):
+            if path.exists():
+                path.unlink()
 
     def handle_result(
         status: str,
@@ -183,8 +181,8 @@ def run_direct_pipeline(
                 print(f"  !! {sample_id} JSON 不合法，进入重试队列 {attempt + 1}/{json_retry_attempts}: {exc}")
                 pending.append((row, attempt + 1))
                 return
-            print(f"  !! {sample_id} 连续 {json_retry_attempts} 次 JSON 不合法，标记 discarded: {exc}")
-            written.append(write_discarded_row(row, attempt, exc))
+            print(f"  !! {sample_id} 连续 {json_retry_attempts} 次 JSON 不合法，未写入最终 metadata: {exc}")
+            remove_stale_retry_outputs(row)
             return
         raise RuntimeError(f"Unexpected direct pipeline row status: {status}")
 

@@ -28,7 +28,19 @@
     "min_box_confidence": 0.0,
     "batch_size": 1,
     "workers": 1,
-    "json_retry_attempts": 3
+    "json_retry_attempts": 3,
+    "crop_review": {
+      "enabled": false,
+      "model_ref": "ppe_person_vlm_labelstudio_detector",
+      "target_object_type": "person",
+      "reviewer": "vlm_crop_reviewer",
+      "prompt_version": "crop_full_person_review_v1",
+      "failed_issue_flag": "incomplete_person_crop",
+      "record_passed": false,
+      "use_response_format": true,
+      "response_format_type": "json_object",
+      "max_tokens": 600
+    }
   },
   "generation": {
     "vlm_model": "aios-smart-eye-vlm",

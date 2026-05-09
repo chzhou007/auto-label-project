@@ -4,10 +4,12 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
 from autolabel.adapters.classification_script import labels_from_boolean_response
+from autolabel.adapters.crop_reviewer import apply_crop_review_result, build_crop_review_config, parse_review_payload
 from autolabel.adapters.vlm_labelstudio_detector import (
     labelstudio_payload_to_objects,
     parse_detector_payload,
@@ -20,7 +22,7 @@ from autolabel.model_config import build_detector_runtime_config, resolve_classi
 from autolabel.modules.classification.dry_run import DryRunClassificationModule
 from autolabel.preprocess import estimate_extracted_frame_count
 from autolabel.exporters.labelstudio import build_labelstudio_config, sample_to_labelstudio_task
-from autolabel.utils import read_json, write_csv
+from autolabel.utils import read_json, write_csv, write_json
 from autolabel.validators import validate_sample_contract
 
 
@@ -138,6 +140,52 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(direct["batch_size"], 1)
         self.assertEqual(direct["workers"], 1)
         self.assertEqual(direct["json_retry_attempts"], 3)
+        self.assertFalse(direct["crop_review"]["enabled"])
+        self.assertEqual(direct["crop_review"]["model_ref"], "ppe_person_vlm_labelstudio_detector")
+        self.assertEqual(build_crop_review_config(config, detector), {"enabled": False})
+
+    def test_crop_review_config_uses_detector_model_profile(self) -> None:
+        config = deepcopy(load_config(ROOT / "configs" / "autolabel.yaml"))
+        config["direct_annotation"]["crop_review"]["enabled"] = True
+        detector = build_detector_runtime_config(config)
+        detector["services"]["ppe_person"]["dry_run"] = True
+
+        review = build_crop_review_config(config, detector)
+        self.assertTrue(review["enabled"])
+        self.assertTrue(review["dry_run"])
+        self.assertEqual(review["model_name"], "aios-smart-eye-vlm")
+        self.assertEqual(review["model_ref"], "ppe_person_vlm_labelstudio_detector")
+
+    def test_crop_review_failure_updates_object_quality_check(self) -> None:
+        obj = {"object_id": "person_000001", "object_type": "person", "quality_check": None}
+        apply_crop_review_result(
+            obj,
+            {
+                "contains_person": True,
+                "is_complete_visible_person": False,
+                "missing_parts": ["feet"],
+                "reason": "脚部被 crop 截断",
+            },
+            {
+                "failed_issue_flag": "incomplete_person_crop",
+                "reviewer": "vlm_crop_reviewer",
+                "prompt_version": "crop_full_person_review_v1",
+            },
+        )
+
+        quality_check = obj["quality_check"]
+        self.assertEqual(quality_check["qc_status"], "failed")
+        self.assertIn("incomplete_person_crop", quality_check["issue_flags"])
+        self.assertIn("missing_feet", quality_check["issue_flags"])
+        self.assertEqual(quality_check["reviewer"], "vlm_crop_reviewer")
+        self.assertIn("脚部被 crop 截断", quality_check["comment"])
+
+    def test_crop_review_parser_reads_json_object_from_response(self) -> None:
+        parsed = parse_review_payload(
+            '结果：{"contains_person": true, "is_complete_visible_person": true, "missing_parts": [], "reason": ""}'
+        )
+        self.assertTrue(parsed["contains_person"])
+        self.assertTrue(parsed["is_complete_visible_person"])
 
     def test_video_frame_stride_count_estimate(self) -> None:
         self.assertEqual(estimate_extracted_frame_count(3000, 30), 100)
@@ -334,7 +382,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(sample["objects"][0]["classification"]["classifier_name"], "dry_run_rule_classifier")
         self.assertTrue(sample["objects"][0]["classification"]["multi_labels"])
 
-    def test_direct_pipeline_discards_after_three_json_parse_failures(self) -> None:
+    def test_direct_pipeline_does_not_write_metadata_after_json_parse_failures(self) -> None:
         from PIL import Image
 
         from autolabel.adapters.vlm_labelstudio_detector import VLMJsonParseError
@@ -390,6 +438,8 @@ class ContractTests(unittest.TestCase):
             }
             detector_config = {"default_task_key": "ppe_person", "services": {"ppe_person": {}}}
             output_root = root / "processed"
+            write_json(output_root / "metadata" / "sample_bad_json.json", {"stale": True})
+            write_json(output_root / "retry_failures" / "sample_bad_json.json", {"stale": True})
 
             with patch("autolabel.pipeline.DetectorServiceClient", FailingDetector):
                 written = run_direct_pipeline(
@@ -400,13 +450,9 @@ class ContractTests(unittest.TestCase):
                     classify=False,
                 )
 
-            self.assertEqual(len(written), 1)
-            sample = read_json(written[0])
-            self.assertEqual(sample["workflow"]["workflow_status"], "discarded")
-            self.assertEqual(sample["objects"], [])
-            failure = read_json(output_root / "retry_failures" / "sample_bad_json.json")
-            self.assertEqual(failure["attempts"], 3)
-            self.assertEqual(failure["reason"], "model_json_parse_error")
+            self.assertEqual(written, [])
+            self.assertFalse((output_root / "metadata" / "sample_bad_json.json").exists())
+            self.assertFalse((output_root / "retry_failures" / "sample_bad_json.json").exists())
 
 
 if __name__ == "__main__":

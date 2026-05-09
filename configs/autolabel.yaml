@@ -227,6 +227,36 @@ direct_annotation:
   batch_size: 1
   workers: 1
   json_retry_attempts: 3
+  # 可选复核：VLM 出框 -> crop -> 再问 VLM crop 是否包含完整可见人体。
+  # 默认关闭；打开后，复核不通过会写入 objects[].quality_check，不会跳过后续分类。
+  crop_review:
+    enabled: false
+    model_ref: ppe_person_vlm_labelstudio_detector
+    target_object_type: person
+    reviewer: vlm_crop_reviewer
+    prompt_version: crop_full_person_review_v1
+    failed_issue_flag: incomplete_person_crop
+    record_passed: false
+    use_response_format: true
+    response_format_type: json_object
+    max_tokens: 600
+    prompt: |
+      你是一个严格的工业安全数据质检员。请检查这张人体检测框裁剪图（crop）是否包含一个完整可见的人体。
+
+      判定规则：
+      1. crop 中必须能看到清晰的人体主体。
+      2. 如果头部在 crop 边缘被截断，判定为不通过。
+      3. 如果脚部或鞋子在 crop 边缘被截断，判定为不通过。
+      4. 如果人体明显偏离 crop，或 crop 只包含背景、柜体、设备、地面，判定为不通过。
+      5. 如果人体只是被原场景中的设备、栏杆或其他物体遮挡，但 crop 边界没有额外截断人体，可判定为通过。
+
+      只输出一个合法 JSON object，不要 markdown，不要解释文字。输出第一个字符必须是 {，最后一个字符必须是 }：
+      {
+        "contains_person": true,
+        "is_complete_visible_person": true,
+        "missing_parts": [],
+        "reason": ""
+      }
 
 classification:
   enabled: true
