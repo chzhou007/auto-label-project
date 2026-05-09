@@ -124,7 +124,7 @@ models:
         classifier_type: vlm
         classifier_name: aios-smart-eye-vlm
         classifier_version: external
-        prompt_version: classification_script_default
+        prompt_version: crop_industrial_safety_v2
         credential_ref: qwen_classifier
         base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
 

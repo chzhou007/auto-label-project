@@ -83,6 +83,13 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(parsed["reflective_vest"], False)
         self.assertEqual(parsed["_parse_mode"], "text_fallback")
 
+    def test_builtin_classifier_normalizes_missing_labels(self) -> None:
+        module = load_builtin_classification_module()
+        parsed = module.normalize_boolean_response({"hard_hat": True, "notes": {}})
+        self.assertTrue(parsed["hard_hat"])
+        self.assertFalse(parsed["safety_shoes"])
+        self.assertIn("safety_shoes", parsed["notes"])
+
     def test_labelstudio_export_shape(self) -> None:
         sample = read_json(ROOT / "schemas" / "autolabel_sample.example.json")
         task = sample_to_labelstudio_task(sample)

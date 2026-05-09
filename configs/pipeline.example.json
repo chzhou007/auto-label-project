@@ -43,7 +43,7 @@
     "classifier_type": "vlm",
     "classifier_name": "classification.py",
     "classifier_version": "external",
-    "prompt_version": "classification_script_default",
+    "prompt_version": "crop_industrial_safety_v2",
     "api_url_env": "QWEN397B_API_URL",
     "api_key_env": "QWEN397B_API_KEY",
     "model_env": "QWEN397B_MODEL",
