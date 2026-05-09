@@ -218,6 +218,8 @@ direct_annotation:
   default_task_key: ppe_person
   crop_expand_ratio: 0.05
   min_box_confidence: 0.0
+  batch_size: 1
+  workers: 1
 
 classification:
   enabled: true

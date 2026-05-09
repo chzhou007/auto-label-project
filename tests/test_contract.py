@@ -115,12 +115,15 @@ class ContractTests(unittest.TestCase):
         classification = resolve_classification_runtime(config)
         detector = build_detector_runtime_config(config)
         preprocess = config["preprocess"]
+        direct = config["direct_annotation"]
         self.assertEqual(generation["vlm_model_name"], "aios-smart-eye-vlm")
         self.assertIn("model", classification)
         self.assertIn("model_profiles", detector)
         self.assertEqual(detector["services"]["ppe_person"]["model_ref"], "ppe_person_vlm_labelstudio_detector")
         self.assertEqual(preprocess["video_decode_mode"], "cpu")
         self.assertEqual(preprocess["video_error_policy"], "skip")
+        self.assertEqual(direct["batch_size"], 1)
+        self.assertEqual(direct["workers"], 1)
 
     def test_video_frame_stride_count_estimate(self) -> None:
         self.assertEqual(estimate_extracted_frame_count(3000, 30), 100)

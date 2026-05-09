@@ -66,6 +66,8 @@ def run_direct_branch(
     classify: bool = True,
     dry_run_geometry: bool = False,
     dry_run_classification: bool = False,
+    batch_size: int | None = None,
+    workers: int | None = None,
 ) -> list[Path]:
     if dry_run_classification:
         config = dict(config)
@@ -89,6 +91,8 @@ def run_direct_branch(
         detector_config=detector_config,
         output_root=output_root or default_processed_root(config),
         classify=classify,
+        batch_size=batch_size,
+        workers=workers,
     )
 
 

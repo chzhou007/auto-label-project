@@ -271,6 +271,48 @@ powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 `
   -DryRunModels
 ```
 
+### Direct pipeline batch / workers
+
+`run_pipeline.py` 的 direct 分支支持按 manifest 行分批提交，并在每个 batch 内并发处理样本：
+
+```powershell
+python scripts/run_pipeline.py `
+  --config configs/autolabel.yaml `
+  --branches direct `
+  --batch-size 512 `
+  --workers 64
+```
+
+一键脚本同样支持：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 `
+  -BatchName batch_001 `
+  -BatchSize 512 `
+  -Workers 64
+```
+
+如果要用 `batch_size=32` 起步：
+
+```powershell
+python scripts/run_pipeline.py `
+  --config configs/autolabel.yaml `
+  --branches direct `
+  --batch-size 32 `
+  --workers 32
+```
+
+或使用一键脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 `
+  -BatchName batch_001 `
+  -BatchSize 32 `
+  -Workers 32
+```
+
+`batch_size` 表示每一轮从 manifest 取多少张图进入处理队列；`workers` 表示客户端同时发起多少个样本级任务。对于 OpenAI-compatible / vLLM 服务，通常是多并发请求触发服务端动态 batching，而不是一次 HTTP 请求里塞 512 张图。H20 场景可以先用 `--batch-size 32 --workers 8/16/32` 验证稳定性，再逐步提高到 `--batch-size 512 --workers 32/64`。如果服务端出现 429、连接重置或超时，就先降低 `workers`。分类限速可通过 `classification.delay_seconds: 0` 关闭。
+
 ## 7. 准备输入数据
 
 把原始图片放到：

@@ -13,6 +13,8 @@ param(
     [switch]$NoVideoGpuFallback,
     [ValidateSet("fail", "skip")]
     [string]$VideoErrorPolicy = "",
+    [Nullable[int]]$BatchSize = $null,
+    [Nullable[int]]$Workers = $null,
     [switch]$DryRunModels,
     [switch]$DryRunGeometry,
     [switch]$DryRunClassification,
@@ -115,6 +117,12 @@ if ($DryRunClassification) {
 }
 if ($NoClassify) {
     $PipelineArgs += "--no-classify"
+}
+if ($null -ne $BatchSize) {
+    $PipelineArgs += @("--batch-size", "$BatchSize")
+}
+if ($null -ne $Workers) {
+    $PipelineArgs += @("--workers", "$Workers")
 }
 
 python @PipelineArgs

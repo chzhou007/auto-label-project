@@ -34,6 +34,8 @@ def main() -> int:
     parser.add_argument("--generation-limit", type=int, default=None)
     parser.add_argument("--no-ingest-generated", action="store_true")
     parser.add_argument("--no-classify", action="store_true")
+    parser.add_argument("--batch-size", type=int, default=None, help="Number of manifest rows submitted per direct batch.")
+    parser.add_argument("--workers", type=int, default=None, help="Concurrent workers for direct detection/crop/classification.")
     parser.add_argument("--dry-run-geometry", action="store_true")
     parser.add_argument("--dry-run-classification", action="store_true")
     parser.add_argument("--dry-run-models", action="store_true")
@@ -65,6 +67,8 @@ def main() -> int:
             classify=not args.no_classify,
             dry_run_geometry=args.dry_run_geometry or args.dry_run_models,
             dry_run_classification=args.dry_run_classification or args.dry_run_models,
+            batch_size=args.batch_size,
+            workers=args.workers,
         )
         print(f"Wrote {len(written)} direct AutoLabelSample files.")
         for path in written:

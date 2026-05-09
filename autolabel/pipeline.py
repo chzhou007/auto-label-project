@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -31,26 +33,55 @@ def _image_dimensions(row: dict[str, Any]) -> tuple[int, int]:
     return get_image_size(_required_row_value(row, "image_uri"))
 
 
+def _positive_int(value: Any, default: int = 1) -> int:
+    if value in (None, ""):
+        return default
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"Expected a positive integer, got: {value!r}")
+    return parsed
+
+
+def _chunks(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    return [items[idx : idx + size] for idx in range(0, len(items), size)]
+
+
 def run_direct_pipeline(
     manifest_csv: str | Path,
     pipeline_config: dict[str, Any],
     detector_config: dict[str, Any],
     output_root: str | Path,
     classify: bool = True,
+    batch_size: int | None = None,
+    workers: int | None = None,
 ) -> list[Path]:
     rows = [row for row in read_csv(manifest_csv) if (row.get("task_mode") or "direct") == "direct"]
     direct_cfg = pipeline_config.get("direct_annotation", {})
     classification_cfg = pipeline_config.get("classification", {})
+    batch_size = _positive_int(batch_size if batch_size is not None else direct_cfg.get("batch_size"), 1)
+    workers = _positive_int(workers if workers is not None else direct_cfg.get("workers"), 1)
     output = Path(output_root)
     metadata_dir = output / "metadata"
     crop_dir = output / "crops"
-    detector = DetectorServiceClient(detector_config)
-    classifier = None
-    if classify:
-        classifier = build_classification_module(pipeline_config)
+    thread_state = threading.local()
 
-    written: list[Path] = []
-    for row in rows:
+    def detector() -> DetectorServiceClient:
+        client = getattr(thread_state, "detector", None)
+        if client is None:
+            client = DetectorServiceClient(detector_config)
+            thread_state.detector = client
+        return client
+
+    def classifier() -> Any:
+        if not classify:
+            return None
+        module = getattr(thread_state, "classifier", None)
+        if module is None:
+            module = build_classification_module(pipeline_config)
+            thread_state.classifier = module
+        return module
+
+    def process_row(row: dict[str, Any]) -> Path:
         _required_row_value(row, "sample_id")
         _required_row_value(row, "image_id")
         _required_row_value(row, "image_uri")
@@ -68,15 +99,16 @@ def run_direct_pipeline(
             workflow_status="raw",
         )
         task_key = row.get("task_key") or direct_cfg.get("default_task_key") or detector_config.get("default_task_key")
-        sample["objects"] = detector.detect(row["image_uri"], task_key)
+        sample["objects"] = detector().detect(row["image_uri"], task_key)
         touch_workflow(sample, "boxed")
 
         attach_crops(sample, crop_dir, float(direct_cfg.get("crop_expand_ratio", 0.0)))
         touch_workflow(sample, "cropped")
 
-        if classifier is not None:
+        classifier_module = classifier()
+        if classifier_module is not None:
             skip_source_types = set(classification_cfg.get("skip_source_types", ["generated"]))
-            classifier.classify_sample(sample, skip_source_types=skip_source_types)
+            classifier_module.classify_sample(sample, skip_source_types=skip_source_types)
         else:
             touch_workflow(sample, "classified")
 
@@ -90,7 +122,19 @@ def run_direct_pipeline(
         validate_sample_contract(sample)
         output_path = metadata_dir / f"{sample['sample_id']}.json"
         write_json(output_path, sample)
-        written.append(output_path)
+        return output_path
+
+    written: list[Path] = []
+    row_batches = _chunks(rows, batch_size)
+    if workers == 1:
+        for row_batch in row_batches:
+            for row in row_batch:
+                written.append(process_row(row))
+        return written
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for row_batch in row_batches:
+            written.extend(executor.map(process_row, row_batch))
     return written
 
 
