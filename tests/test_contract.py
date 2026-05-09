@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from autolabel.adapters.classification_script import labels_from_boolean_response
 from autolabel.adapters.vlm_labelstudio_detector import (
@@ -18,7 +20,7 @@ from autolabel.model_config import build_detector_runtime_config, resolve_classi
 from autolabel.modules.classification.dry_run import DryRunClassificationModule
 from autolabel.preprocess import estimate_extracted_frame_count
 from autolabel.exporters.labelstudio import build_labelstudio_config, sample_to_labelstudio_task
-from autolabel.utils import read_json
+from autolabel.utils import read_json, write_csv
 from autolabel.validators import validate_sample_contract
 
 
@@ -120,10 +122,17 @@ class ContractTests(unittest.TestCase):
         self.assertIn("model", classification)
         self.assertIn("model_profiles", detector)
         self.assertEqual(detector["services"]["ppe_person"]["model_ref"], "ppe_person_vlm_labelstudio_detector")
+        self.assertEqual(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["parse_retry_count"], 0)
+        self.assertTrue(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["fail_on_parse_error"])
+        self.assertEqual(classification["max_tokens"], 2000)
+        self.assertEqual(classification["parse_retry_count"], 0)
+        self.assertTrue(classification["use_response_format"])
+        self.assertFalse(classification["text_fallback_enabled"])
         self.assertEqual(preprocess["video_decode_mode"], "cpu")
         self.assertEqual(preprocess["video_error_policy"], "skip")
         self.assertEqual(direct["batch_size"], 1)
         self.assertEqual(direct["workers"], 1)
+        self.assertEqual(direct["json_retry_attempts"], 3)
 
     def test_video_frame_stride_count_estimate(self) -> None:
         self.assertEqual(estimate_extracted_frame_count(3000, 30), 100)
@@ -284,6 +293,80 @@ class ContractTests(unittest.TestCase):
         validate_sample_contract(sample)
         self.assertEqual(sample["objects"][0]["classification"]["classifier_name"], "dry_run_rule_classifier")
         self.assertTrue(sample["objects"][0]["classification"]["multi_labels"])
+
+    def test_direct_pipeline_discards_after_three_json_parse_failures(self) -> None:
+        from PIL import Image
+
+        from autolabel.adapters.vlm_labelstudio_detector import VLMJsonParseError
+        from autolabel.pipeline import run_direct_pipeline
+
+        class FailingDetector:
+            def __init__(self, _config: dict) -> None:
+                pass
+
+            def detect(self, _image_uri: str, _task_key: str | None = None) -> list[dict]:
+                raise VLMJsonParseError("bad detector json")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "image.jpg"
+            Image.new("RGB", (100, 80), color=(255, 255, 255)).save(image_path)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_bad_json",
+                        "image_id": "image_bad_json",
+                        "image_uri": str(image_path),
+                        "source_type": "manual_upload",
+                        "task_mode": "direct",
+                        "width": 100,
+                        "height": 80,
+                    }
+                ],
+                [
+                    "sample_id",
+                    "image_id",
+                    "image_uri",
+                    "source_type",
+                    "task_mode",
+                    "width",
+                    "height",
+                ],
+            )
+
+            pipeline_config = {
+                "pipeline_id": "test_pipeline",
+                "pipeline_version": "test",
+                "direct_annotation": {
+                    "default_task_key": "ppe_person",
+                    "json_retry_attempts": 3,
+                    "batch_size": 1,
+                    "workers": 1,
+                },
+                "classification": {"enabled": False},
+                "export": {"export_format": "labelstudio", "export_status": "not_exported"},
+            }
+            detector_config = {"default_task_key": "ppe_person", "services": {"ppe_person": {}}}
+            output_root = root / "processed"
+
+            with patch("autolabel.pipeline.DetectorServiceClient", FailingDetector):
+                written = run_direct_pipeline(
+                    manifest_path,
+                    pipeline_config,
+                    detector_config,
+                    output_root,
+                    classify=False,
+                )
+
+            self.assertEqual(len(written), 1)
+            sample = read_json(written[0])
+            self.assertEqual(sample["workflow"]["workflow_status"], "discarded")
+            self.assertEqual(sample["objects"], [])
+            failure = read_json(output_root / "retry_failures" / "sample_bad_json.json")
+            self.assertEqual(failure["attempts"], 3)
+            self.assertEqual(failure["reason"], "model_json_parse_error")
 
 
 if __name__ == "__main__":

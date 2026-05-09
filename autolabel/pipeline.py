@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+from .adapters.classification_script import ClassificationJsonParseError
 from .adapters.detector_service import DetectorServiceClient
+from .adapters.vlm_labelstudio_detector import VLMJsonParseError
 from .adapters.i2i_generator import load_generated_samples
 from .config_loader import load_config
 from .contract_normalizer import normalize_autolabel_sample
@@ -46,6 +48,9 @@ def _chunks(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]
     return [items[idx : idx + size] for idx in range(0, len(items), size)]
 
 
+MODEL_JSON_PARSE_ERRORS = (VLMJsonParseError, ClassificationJsonParseError)
+
+
 def run_direct_pipeline(
     manifest_csv: str | Path,
     pipeline_config: dict[str, Any],
@@ -60,9 +65,11 @@ def run_direct_pipeline(
     classification_cfg = pipeline_config.get("classification", {})
     batch_size = _positive_int(batch_size if batch_size is not None else direct_cfg.get("batch_size"), 1)
     workers = _positive_int(workers if workers is not None else direct_cfg.get("workers"), 1)
+    json_retry_attempts = _positive_int(direct_cfg.get("json_retry_attempts"), 3)
     output = Path(output_root)
     metadata_dir = output / "metadata"
     crop_dir = output / "crops"
+    retry_failure_dir = output / "retry_failures"
     thread_state = threading.local()
 
     def detector() -> DetectorServiceClient:
@@ -81,14 +88,13 @@ def run_direct_pipeline(
             thread_state.classifier = module
         return module
 
-    def process_row(row: dict[str, Any]) -> Path:
+    def make_base_sample(row: dict[str, Any], workflow_status: str = "raw") -> dict[str, Any]:
         _required_row_value(row, "sample_id")
         _required_row_value(row, "image_id")
         _required_row_value(row, "image_uri")
         _required_row_value(row, "source_type")
         width, height = _image_dimensions(row)
-
-        sample = make_sample(
+        return make_sample(
             row,
             width=width,
             height=height,
@@ -96,8 +102,11 @@ def run_direct_pipeline(
             pipeline_version=pipeline_config.get("pipeline_version", "0.1.0"),
             qc_policy=pipeline_config.get("qc_policy"),
             export_config=pipeline_config.get("export"),
-            workflow_status="raw",
+            workflow_status=workflow_status,
         )
+
+    def process_row(row: dict[str, Any]) -> Path:
+        sample = make_base_sample(row, workflow_status="raw")
         task_key = row.get("task_key") or direct_cfg.get("default_task_key") or detector_config.get("default_task_key")
         sample["objects"] = detector().detect(row["image_uri"], task_key)
         touch_workflow(sample, "boxed")
@@ -124,17 +133,76 @@ def run_direct_pipeline(
         write_json(output_path, sample)
         return output_path
 
+    def write_discarded_row(row: dict[str, Any], attempt: int, exc: Exception) -> Path:
+        sample = make_base_sample(row, workflow_status="discarded")
+        sample = normalize_autolabel_sample(
+            sample,
+            pipeline_id=pipeline_config.get("pipeline_id"),
+            pipeline_version=pipeline_config.get("pipeline_version"),
+            qc_policy=pipeline_config.get("qc_policy"),
+            export_config=pipeline_config.get("export"),
+        )
+        validate_sample_contract(sample)
+
+        output_path = metadata_dir / f"{sample['sample_id']}.json"
+        write_json(output_path, sample)
+        write_json(
+            retry_failure_dir / f"{sample['sample_id']}.json",
+            {
+                "sample_id": sample["sample_id"],
+                "image_uri": sample["image_asset"]["image_uri"],
+                "workflow_status": "discarded",
+                "reason": "model_json_parse_error",
+                "attempts": attempt,
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+            },
+        )
+        return output_path
+
+    def handle_row(row: dict[str, Any], attempt: int) -> tuple[str, Path | None, dict[str, Any], int, Exception | None]:
+        try:
+            return "ok", process_row(row), row, attempt, None
+        except MODEL_JSON_PARSE_ERRORS as exc:
+            return "json_error", None, row, attempt, exc
+
+    def handle_result(
+        status: str,
+        path: Path | None,
+        row: dict[str, Any],
+        attempt: int,
+        exc: Exception | None,
+        pending: list[tuple[dict[str, Any], int]],
+    ) -> None:
+        if status == "ok" and path is not None:
+            written.append(path)
+            return
+        if status == "json_error" and exc is not None:
+            sample_id = row.get("sample_id", "<missing_sample_id>")
+            if attempt < json_retry_attempts:
+                print(f"  !! {sample_id} JSON 不合法，进入重试队列 {attempt + 1}/{json_retry_attempts}: {exc}")
+                pending.append((row, attempt + 1))
+                return
+            print(f"  !! {sample_id} 连续 {json_retry_attempts} 次 JSON 不合法，标记 discarded: {exc}")
+            written.append(write_discarded_row(row, attempt, exc))
+            return
+        raise RuntimeError(f"Unexpected direct pipeline row status: {status}")
+
     written: list[Path] = []
-    row_batches = _chunks(rows, batch_size)
+    pending: list[tuple[dict[str, Any], int]] = [(row, 1) for row in rows]
     if workers == 1:
-        for row_batch in row_batches:
-            for row in row_batch:
-                written.append(process_row(row))
+        while pending:
+            row_batch, pending = pending[:batch_size], pending[batch_size:]
+            for row, attempt in row_batch:
+                handle_result(*handle_row(row, attempt), pending=pending)
         return written
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        for row_batch in row_batches:
-            written.extend(executor.map(process_row, row_batch))
+        while pending:
+            row_batch, pending = pending[:batch_size], pending[batch_size:]
+            futures = [executor.submit(handle_row, row, attempt) for row, attempt in row_batch]
+            for future in as_completed(futures):
+                handle_result(*future.result(), pending=pending)
     return written
 
 

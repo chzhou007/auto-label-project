@@ -27,7 +27,8 @@
     "crop_expand_ratio": 0.05,
     "min_box_confidence": 0.0,
     "batch_size": 1,
-    "workers": 1
+    "workers": 1,
+    "json_retry_attempts": 3
   },
   "generation": {
     "vlm_model": "aios-smart-eye-vlm",
@@ -49,7 +50,12 @@
     "api_url_env": "QWEN397B_API_URL",
     "api_key_env": "QWEN397B_API_KEY",
     "model_env": "QWEN397B_MODEL",
-    "delay_seconds": 0.5
+    "delay_seconds": 0.5,
+    "max_tokens": 2000,
+    "parse_retry_count": 0,
+    "use_response_format": true,
+    "text_fallback_enabled": false,
+    "log_parse_fallback": false
   },
   "qc_policy": {
     "qc_mode": "sampling",

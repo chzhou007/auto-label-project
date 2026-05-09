@@ -26,6 +26,10 @@ BOOLEAN_LABEL_MAP = {
 }
 
 
+class ClassificationJsonParseError(ValueError):
+    """Raised when a classification module returns non-JSON model output."""
+
+
 def load_classification_module(script_path: str | Path) -> ModuleType:
     path = Path(script_path)
     if not path.exists():
@@ -55,6 +59,11 @@ class ClassificationScriptAdapter:
         classifier_version: str | None = None,
         prompt_version: str | None = None,
         delay_seconds: float = 0.5,
+        max_tokens: int | None = None,
+        parse_retry_count: int | None = None,
+        use_response_format: bool | None = None,
+        text_fallback_enabled: bool | None = None,
+        log_parse_fallback: bool | None = None,
     ) -> None:
         self.script_path = Path(script_path)
         self.api_url = api_url
@@ -65,6 +74,11 @@ class ClassificationScriptAdapter:
         self.classifier_version = classifier_version
         self.prompt_version = prompt_version
         self.delay_seconds = delay_seconds
+        self.max_tokens = max_tokens
+        self.parse_retry_count = parse_retry_count
+        self.use_response_format = use_response_format
+        self.text_fallback_enabled = text_fallback_enabled
+        self.log_parse_fallback = log_parse_fallback
         self._module: ModuleType | None = None
         self._client: Any | None = None
 
@@ -80,6 +94,13 @@ class ClassificationScriptAdapter:
             classifier_version=config.get("classifier_version") or config.get("model_version"),
             prompt_version=config.get("prompt_version"),
             delay_seconds=float(config.get("delay_seconds", 0.5)),
+            max_tokens=int(config["max_tokens"]) if config.get("max_tokens") not in (None, "") else None,
+            parse_retry_count=(
+                int(config["parse_retry_count"]) if config.get("parse_retry_count") not in (None, "") else None
+            ),
+            use_response_format=config.get("use_response_format"),
+            text_fallback_enabled=config.get("text_fallback_enabled"),
+            log_parse_fallback=config.get("log_parse_fallback"),
         )
 
     @property
@@ -106,7 +127,12 @@ class ClassificationScriptAdapter:
         return self._client
 
     def classify_crop(self, crop_uri: str | Path) -> dict[str, Any]:
-        raw_response = self.module.process_image(str(crop_uri), self.client)
+        try:
+            raw_response = self.module.process_image(str(crop_uri), self.client, self.classifier_config())
+        except Exception as exc:
+            if exc.__class__.__name__ == "ClassificationJsonParseError":
+                raise ClassificationJsonParseError(str(exc)) from exc
+            raise
         labels = labels_from_boolean_response(raw_response)
         return {
             "multi_labels": labels,
@@ -116,6 +142,28 @@ class ClassificationScriptAdapter:
             "prompt_version": self.prompt_version,
             "raw_response": raw_response if isinstance(raw_response, dict) else {"raw": raw_response},
         }
+
+    def classifier_config(self) -> dict[str, Any]:
+        config = {
+            "classifier_type": self.classifier_type,
+            "classifier_name": self.classifier_name,
+            "classifier_version": self.classifier_version,
+            "prompt_version": self.prompt_version,
+            "model": self.model,
+            "model_version": self.classifier_version,
+            "delay_seconds": self.delay_seconds,
+        }
+        if self.max_tokens is not None:
+            config["max_tokens"] = self.max_tokens
+        if self.parse_retry_count is not None:
+            config["parse_retry_count"] = self.parse_retry_count
+        if self.use_response_format is not None:
+            config["use_response_format"] = self.use_response_format
+        if self.text_fallback_enabled is not None:
+            config["text_fallback_enabled"] = self.text_fallback_enabled
+        if self.log_parse_fallback is not None:
+            config["log_parse_fallback"] = self.log_parse_fallback
+        return config
 
     def classify_sample(
         self,
@@ -129,21 +177,18 @@ class ClassificationScriptAdapter:
 
         sample_classifier = getattr(self.module, "classify_sample", None)
         if callable(sample_classifier):
-            result = sample_classifier(
-                sample,
-                self.client,
-                skip_source_types=skip_source_types,
-                classifier_config={
-                    "classifier_type": self.classifier_type,
-                    "classifier_name": self.classifier_name,
-                    "classifier_version": self.classifier_version,
-                    "prompt_version": self.prompt_version,
-                    "model": self.model,
-                    "model_version": self.classifier_version,
-                    "delay_seconds": self.delay_seconds,
-                },
-                delay_seconds=self.delay_seconds,
-            )
+            try:
+                result = sample_classifier(
+                    sample,
+                    self.client,
+                    skip_source_types=skip_source_types,
+                    classifier_config=self.classifier_config(),
+                    delay_seconds=self.delay_seconds,
+                )
+            except Exception as exc:
+                if exc.__class__.__name__ == "ClassificationJsonParseError":
+                    raise ClassificationJsonParseError(str(exc)) from exc
+                raise
             if isinstance(result, dict):
                 return result
             touch_workflow(sample, "classified")

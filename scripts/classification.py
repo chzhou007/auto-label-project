@@ -28,6 +28,11 @@ except ImportError:
 DEFAULT_API_URL = os.getenv("QWEN397B_API_URL", "https://deepseek.gds-services.com/vllm-qwen35b/v1")
 DEFAULT_API_KEY = os.getenv("QWEN397B_API_KEY", "")
 DEFAULT_MODEL = os.getenv("QWEN397B_MODEL", "aios-smart-eye-vlm")
+DEFAULT_MAX_TOKENS = int(os.getenv("QWEN397B_MAX_TOKENS", "2000"))
+DEFAULT_PARSE_RETRY_COUNT = int(os.getenv("QWEN397B_PARSE_RETRY_COUNT", "1"))
+DEFAULT_USE_RESPONSE_FORMAT = os.getenv("QWEN397B_USE_RESPONSE_FORMAT", "1").lower() not in {"0", "false", "no"}
+DEFAULT_LOG_PARSE_FALLBACK = os.getenv("QWEN397B_LOG_PARSE_FALLBACK", "0").lower() in {"1", "true", "yes"}
+DEFAULT_TEXT_FALLBACK_ENABLED = os.getenv("QWEN397B_TEXT_FALLBACK_ENABLED", "0").lower() in {"1", "true", "yes"}
 PROMPT_VERSION = "crop_industrial_safety_v2"
 
 SYSTEM_PROMPT = """你是一个严格的工业安全视觉识别专家，专门针对【人体检测框裁剪图（Crop图）】执行安全穿戴及不安全行为的自动化标注任务。
@@ -82,6 +87,15 @@ safety_goggles (穿戴护目镜): 观察眼部。若面部背对镜头、被遮�
   "notes": {}
 }
 """
+
+JSON_RETRY_USER_PROMPT = """上一轮输出不是合法 JSON。请重新分析同一张人体检测框裁剪图，并只输出一个紧凑 JSON 对象。
+禁止输出解释、Markdown、编号列表或 JSON 之外的任何文字。
+必须包含 safety_harness、hard_hat、reflective_vest、safety_shoes、smoking、falling_down、sleeping_on_duty、climbing_over_railing、touching_equipment、fighting、using_phone、safety_goggles、notes。
+所有标签值必须是 true 或 false。notes 必须是对象；如果没有备注，输出 {}。"""
+
+class ClassificationJsonParseError(ValueError):
+    """Raised when the classifier does not return parseable JSON after retries."""
+
 
 BOOLEAN_LABEL_MAP = {
     "safety_harness": ("safety_belt", "wearing_safety_belt", "no_safety_belt"),
@@ -221,37 +235,104 @@ def normalize_boolean_response(raw_response: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def process_image(image_path: str | Path, client: OpenAI) -> dict[str, Any]:
+def _bool_config(config: dict[str, Any], key: str, default: bool) -> bool:
+    value = config.get(key, default)
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in {"1", "true", "yes"}
+
+
+def request_classification_text(
+    client: OpenAI,
+    image_url: str,
+    user_prompt: str,
+    *,
+    max_tokens: int,
+    use_response_format: bool,
+) -> str:
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": user_prompt},
+            ],
+        },
+    ]
+
+    def create(with_response_format: bool) -> Any:
+        kwargs = {
+            "model": DEFAULT_MODEL,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+        }
+        if with_response_format:
+            kwargs["response_format"] = {"type": "json_object"}
+        return client.chat.completions.create(**kwargs)
+
+    if use_response_format:
+        try:
+            response = create(True)
+        except Exception as exc:
+            message = str(exc).lower()
+            if "response_format" not in message and "json_object" not in message and "guided" not in message:
+                raise
+            response = create(False)
+    else:
+        response = create(False)
+    return response.choices[0].message.content or ""
+
+
+def process_image(
+    image_path: str | Path,
+    client: OpenAI,
+    classifier_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     print(f"  识别: {image_path}")
     raw_output = ""
+    classifier_config = classifier_config or {}
+    max_tokens = int(classifier_config.get("max_tokens", DEFAULT_MAX_TOKENS))
+    parse_retry_count = int(classifier_config.get("parse_retry_count", DEFAULT_PARSE_RETRY_COUNT))
+    use_response_format = _bool_config(classifier_config, "use_response_format", DEFAULT_USE_RESPONSE_FORMAT)
+    log_parse_fallback = _bool_config(classifier_config, "log_parse_fallback", DEFAULT_LOG_PARSE_FALLBACK)
+    text_fallback_enabled = _bool_config(
+        classifier_config,
+        "text_fallback_enabled",
+        DEFAULT_TEXT_FALLBACK_ENABLED,
+    )
     try:
         image_url = f"data:{get_image_mime_type(image_path)};base64,{encode_image(image_path)}"
-        response = client.chat.completions.create(
-            model=DEFAULT_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                        {"type": "text", "text": "请按照系统提示分析这张人体检测框裁剪图，仅输出规定的纯 JSON 对象。"},
-                    ],
-                },
-            ],
-            max_tokens=800,
-            temperature=0.0,
-        )
-        raw_output = response.choices[0].message.content or ""
-        result = parse_json_output(raw_output, expected_type=dict)
-        return normalize_boolean_response(result)
-    except json.JSONDecodeError as exc:
-        fallback = parse_boolean_text_output(raw_output)
+        prompts = ["请按照系统提示分析这张人体检测框裁剪图，仅输出规定的纯 JSON 对象。"]
+        prompts.extend([JSON_RETRY_USER_PROMPT] * parse_retry_count)
+        last_json_error: json.JSONDecodeError | None = None
+        for user_prompt in prompts:
+            raw_output = request_classification_text(
+                client,
+                image_url,
+                user_prompt,
+                max_tokens=max_tokens,
+                use_response_format=use_response_format,
+            )
+            try:
+                result = parse_json_output(raw_output, expected_type=dict)
+                return normalize_boolean_response(result)
+            except json.JSONDecodeError as exc:
+                last_json_error = exc
+
+        fallback = parse_boolean_text_output(raw_output) if text_fallback_enabled else None
         if fallback is not None:
-            print(f"  !! JSON 解析失败，已使用文本兜底解析: {exc}")
+            if log_parse_fallback:
+                print(f"  !! JSON 解析失败，已使用文本兜底解析: {last_json_error}")
             return normalize_boolean_response(fallback)
-        print(f"  !! JSON 解析失败: {exc}")
-        print(f"  !! 原始返回前300字符: {raw_output.replace(chr(10), ' ')[:300]}")
-        return {"error": "JSON decode error", "raw": raw_output}
+        if last_json_error is not None:
+            raise last_json_error
+        raise json.JSONDecodeError("No JSON object or array found", raw_output, 0)
+    except json.JSONDecodeError as exc:
+        raise ClassificationJsonParseError(
+            f"Classification JSON parse failed: {exc}; preview={_clean_note(raw_output, limit=300)}"
+        ) from exc
     except Exception as exc:
         print(f"  !! 调用 API 出错: {exc}")
         return {"error": str(exc), "raw": raw_output}
@@ -304,7 +385,7 @@ def classify_object(
     if not crop_uri:
         raw_response = {"error": "missing crop.crop_uri"}
     else:
-        raw_response = process_image(crop_uri, client)
+        raw_response = process_image(crop_uri, client, classifier_config)
     obj["classification"] = build_autolabel_classification(raw_response, classifier_config)
     return obj
 
@@ -343,6 +424,11 @@ def main() -> int:
     parser.add_argument("--api-key", default=DEFAULT_API_KEY)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--delay", type=float, default=0.5)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    parser.add_argument("--parse-retry-count", type=int, default=DEFAULT_PARSE_RETRY_COUNT)
+    parser.add_argument("--no-response-format", action="store_true")
+    parser.add_argument("--text-fallback", action="store_true")
+    parser.add_argument("--log-parse-fallback", action="store_true")
     args = parser.parse_args()
 
     if not args.api_key:
@@ -359,7 +445,18 @@ def main() -> int:
     with open(sample_path, encoding="utf-8") as f:
         sample = json.load(f)
 
-    sample = classify_sample(sample, client, delay_seconds=args.delay)
+    sample = classify_sample(
+        sample,
+        client,
+        classifier_config={
+            "max_tokens": args.max_tokens,
+            "parse_retry_count": args.parse_retry_count,
+            "use_response_format": not args.no_response_format,
+            "text_fallback_enabled": args.text_fallback,
+            "log_parse_fallback": args.log_parse_fallback,
+        },
+        delay_seconds=args.delay,
+    )
     output_path = Path(args.output) if args.output else sample_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:

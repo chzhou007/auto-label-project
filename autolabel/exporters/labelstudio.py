@@ -139,10 +139,14 @@ def sample_to_labelstudio_task(sample: dict[str, Any]) -> dict[str, Any]:
 
 
 def export_samples(samples: list[dict[str, Any]], output_path: str | Path) -> list[dict[str, Any]]:
-    tasks = [sample_to_labelstudio_task(sample) for sample in samples]
+    tasks = [sample_to_labelstudio_task(sample) for sample in samples if is_exportable_sample(sample)]
     write_json(output_path, tasks)
-    write_labelstudio_config(default_config_path(output_path), samples)
+    write_labelstudio_config(default_config_path(output_path), [sample for sample in samples if is_exportable_sample(sample)])
     return tasks
+
+
+def is_exportable_sample(sample: dict[str, Any]) -> bool:
+    return sample.get("workflow", {}).get("workflow_status") != "discarded"
 
 
 def export_metadata_dir(metadata_dir: str | Path, output_path: str | Path, update_samples: bool = False) -> list[dict[str, Any]]:
@@ -150,6 +154,8 @@ def export_metadata_dir(metadata_dir: str | Path, output_path: str | Path, updat
     samples = []
     for path in sorted(root.glob("*.json")):
         sample = read_json(path)
+        if not is_exportable_sample(sample):
+            continue
         samples.append(sample)
         if update_samples:
             sample["export"]["export_format"] = "labelstudio"
