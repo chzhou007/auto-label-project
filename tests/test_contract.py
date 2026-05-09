@@ -11,6 +11,7 @@ from unittest.mock import patch
 from autolabel.adapters.classification_script import labels_from_boolean_response
 from autolabel.adapters.crop_reviewer import apply_crop_review_result, build_crop_review_config, parse_review_payload
 from autolabel.adapters.vlm_labelstudio_detector import (
+    labelstudio_value_to_xyxy,
     labelstudio_payload_to_objects,
     parse_detector_payload,
     parse_json_output,
@@ -149,6 +150,8 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["fail_on_parse_error"])
         self.assertTrue(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["use_response_format"])
         self.assertEqual(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["request_image_max_side"], 1280)
+        self.assertEqual(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["coordinate_units"], "auto")
+        self.assertTrue(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["auto_detect_coordinate_units"])
         self.assertEqual(
             detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["response_format_type"],
             "json_object",
@@ -226,6 +229,35 @@ class ContractTests(unittest.TestCase):
     def test_labelstudio_percent_box_converts_to_xyxy_pixels(self) -> None:
         box = percent_box_to_xyxy({"x": 10.0, "y": 20.0, "width": 30.0, "height": 40.0}, 1000, 500)
         self.assertEqual(box, {"format": "xyxy", "x1": 100, "y1": 100, "x2": 400, "y2": 300})
+
+    def test_vlm_box_converter_auto_detects_pixel_xywh(self) -> None:
+        box, coordinate_unit = labelstudio_value_to_xyxy(
+            {"x": 500.0, "y": 100.0, "width": 50.0, "height": 200.0},
+            1000,
+            500,
+        )
+        self.assertEqual(box, {"format": "xyxy", "x1": 500, "y1": 100, "x2": 550, "y2": 300})
+        self.assertEqual(coordinate_unit, "pixel_xywh_auto_detected")
+
+    def test_vlm_box_converter_maps_resized_pixel_xywh_back_to_original(self) -> None:
+        box, coordinate_unit = labelstudio_value_to_xyxy(
+            {"x": 640.0, "y": 100.0, "width": 100.0, "height": 300.0},
+            3840,
+            2160,
+            request_width=1280,
+            request_height=720,
+        )
+        self.assertEqual(box, {"format": "xyxy", "x1": 1920, "y1": 300, "x2": 2220, "y2": 1200})
+        self.assertEqual(coordinate_unit, "pixel_xywh_auto_detected")
+
+    def test_vlm_box_converter_keeps_valid_percent_xywh(self) -> None:
+        box, coordinate_unit = labelstudio_value_to_xyxy(
+            {"x": 80.0, "y": 20.0, "width": 15.0, "height": 40.0},
+            1000,
+            500,
+        )
+        self.assertEqual(box, {"format": "xyxy", "x1": 800, "y1": 100, "x2": 950, "y2": 300})
+        self.assertEqual(coordinate_unit, "labelstudio_percent_xywh")
 
     def test_vlm_json_parser_ignores_explanatory_suffix(self) -> None:
         payload = parse_json_output('结果如下：[{"predictions": [{"result": []}]}]\n说明文字')

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -87,23 +88,24 @@ def filter_detected_objects(objects: list[dict[str, Any]], direct_cfg: dict[str,
     max_box_aspect_ratio = _nonnegative_float(direct_cfg.get("max_box_aspect_ratio"), 0.0)
 
     kept: list[dict[str, Any]] = []
-    dropped = 0
+    dropped: Counter[str] = Counter()
     for obj in objects:
         confidence = _object_confidence(obj)
         if confidence is not None and confidence < min_confidence:
-            dropped += 1
+            dropped["low_confidence"] += 1
             continue
         width, height = _box_width_height(obj)
         if width < min_box_width or height < min_box_height or width * height < min_box_area:
-            dropped += 1
+            dropped["tiny_box"] += 1
             continue
         if max_box_aspect_ratio and max(width / height, height / width) > max_box_aspect_ratio:
-            dropped += 1
+            dropped["extreme_aspect_ratio"] += 1
             continue
         kept.append(obj)
 
     if dropped:
-        print(f"  !! {sample_id} 已过滤 {dropped} 个过小或低置信度检测框")
+        details = ", ".join(f"{key}={value}" for key, value in sorted(dropped.items()))
+        print(f"  !! {sample_id} 已过滤 {sum(dropped.values())} 个检测框: {details}")
     return kept
 
 

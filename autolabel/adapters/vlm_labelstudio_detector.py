@@ -106,8 +106,121 @@ def percent_box_to_xyxy(value: dict[str, Any], width: int, height: int) -> dict[
     return make_box(x1, y1, x2, y2)
 
 
+def scale_xyxy_box(
+    box: dict[str, int | str],
+    source_width: int,
+    source_height: int,
+    target_width: int,
+    target_height: int,
+) -> dict[str, int | str]:
+    if source_width == target_width and source_height == target_height:
+        return box
+    x_scale = target_width / float(source_width)
+    y_scale = target_height / float(source_height)
+    x1 = max(0, min(target_width - 1, round(int(box["x1"]) * x_scale)))
+    y1 = max(0, min(target_height - 1, round(int(box["y1"]) * y_scale)))
+    x2 = max(x1 + 1, min(target_width, round(int(box["x2"]) * x_scale)))
+    y2 = max(y1 + 1, min(target_height, round(int(box["y2"]) * y_scale)))
+    return make_box(x1, y1, x2, y2)
+
+
+def pixel_rect_to_xyxy(
+    value: dict[str, Any],
+    source_width: int,
+    source_height: int,
+    target_width: int | None = None,
+    target_height: int | None = None,
+) -> dict[str, int | str]:
+    target_width = target_width or source_width
+    target_height = target_height or source_height
+    x = float(value["x"])
+    y = float(value["y"])
+    w = float(value["width"])
+    h = float(value["height"])
+    x1 = max(0, min(source_width - 1, round(x)))
+    y1 = max(0, min(source_height - 1, round(y)))
+    x2 = max(x1 + 1, min(source_width, round(x + w)))
+    y2 = max(y1 + 1, min(source_height, round(y + h)))
+    return scale_xyxy_box(make_box(x1, y1, x2, y2), source_width, source_height, target_width, target_height)
+
+
+def corner_box_to_xyxy(
+    value: dict[str, Any],
+    width: int,
+    height: int,
+    request_width: int | None = None,
+    request_height: int | None = None,
+) -> dict[str, int | str]:
+    raw_x1 = float(value["x1"])
+    raw_y1 = float(value["y1"])
+    raw_x2 = float(value["x2"])
+    raw_y2 = float(value["y2"])
+    looks_percent = max(abs(raw_x1), abs(raw_y1), abs(raw_x2), abs(raw_y2)) <= 100.0
+    if looks_percent:
+        raw_x1 = width * raw_x1 / 100.0
+        raw_x2 = width * raw_x2 / 100.0
+        raw_y1 = height * raw_y1 / 100.0
+        raw_y2 = height * raw_y2 / 100.0
+        x1 = max(0, min(width - 1, round(min(raw_x1, raw_x2))))
+        y1 = max(0, min(height - 1, round(min(raw_y1, raw_y2))))
+        x2 = max(x1 + 1, min(width, round(max(raw_x1, raw_x2))))
+        y2 = max(y1 + 1, min(height, round(max(raw_y1, raw_y2))))
+        return make_box(x1, y1, x2, y2)
+
+    source_width = request_width or width
+    source_height = request_height or height
+    x1 = max(0, min(source_width - 1, round(min(raw_x1, raw_x2))))
+    y1 = max(0, min(source_height - 1, round(min(raw_y1, raw_y2))))
+    x2 = max(x1 + 1, min(source_width, round(max(raw_x1, raw_x2))))
+    y2 = max(y1 + 1, min(source_height, round(max(raw_y1, raw_y2))))
+    return scale_xyxy_box(make_box(x1, y1, x2, y2), source_width, source_height, width, height)
+
+
+def labelstudio_value_to_xyxy(
+    value: dict[str, Any],
+    width: int,
+    height: int,
+    *,
+    coordinate_units: str = "auto",
+    auto_detect_coordinate_units: bool = True,
+    request_width: int | None = None,
+    request_height: int | None = None,
+) -> tuple[dict[str, int | str], str]:
+    if {"x1", "y1", "x2", "y2"}.issubset(value):
+        box = corner_box_to_xyxy(value, width, height, request_width=request_width, request_height=request_height)
+        unit = "percent_xyxy" if max(abs(float(value[key])) for key in ("x1", "y1", "x2", "y2")) <= 100.0 else "pixel_xyxy"
+        return box, unit
+
+    if not {"x", "y", "width", "height"}.issubset(value):
+        raise ValueError(f"Missing rectangle fields in VLM output: {value!r}")
+
+    x = float(value["x"])
+    y = float(value["y"])
+    w = float(value["width"])
+    h = float(value["height"])
+    coordinate_units = (coordinate_units or "auto").lower()
+    source_width = request_width or width
+    source_height = request_height or height
+    if coordinate_units in {"pixel", "pixels", "xywh_pixel"}:
+        return pixel_rect_to_xyxy(value, source_width, source_height, width, height), "pixel_xywh_configured"
+    if coordinate_units in {"percent", "percentage", "labelstudio"}:
+        return percent_box_to_xyxy(value, width, height), "labelstudio_percent_xywh"
+
+    looks_pixel = auto_detect_coordinate_units and (x > 100.0 or y > 100.0 or w > 100.0 or h > 100.0)
+    if looks_pixel:
+        return pixel_rect_to_xyxy(value, source_width, source_height, width, height), "pixel_xywh_auto_detected"
+    return percent_box_to_xyxy(value, width, height), "labelstudio_percent_xywh"
+
+
 def stable_object_id(prefix: str, index: int) -> str:
     return f"{prefix}_{index:06d}"
+
+
+def resized_dimensions(width: int, height: int, max_side: int | None) -> tuple[int, int]:
+    if max_side is None or max_side <= 0 or max(width, height) <= max_side:
+        return width, height
+    scale = max_side / float(max(width, height))
+    return max(1, round(width * scale)), max(1, round(height * scale))
 
 
 def labelstudio_payload_to_objects(
@@ -117,6 +230,8 @@ def labelstudio_payload_to_objects(
     height: int,
     service: dict[str, Any],
     raw_response: Any | None = None,
+    request_width: int | None = None,
+    request_height: int | None = None,
 ) -> list[dict[str, Any]]:
     tasks = payload if isinstance(payload, list) else [payload]
     object_type_map = service.get("object_type_map", {})
@@ -137,7 +252,18 @@ def labelstudio_payload_to_objects(
                 labels = value.get("rectanglelabels") or []
                 label = labels[0] if labels else service.get("target_label", "Person")
                 object_type = object_type_map.get(label, default_object_type)
-                box = percent_box_to_xyxy(value, width, height)
+                box, coordinate_unit = labelstudio_value_to_xyxy(
+                    value,
+                    width,
+                    height,
+                    coordinate_units=str(service.get("coordinate_units", "auto")),
+                    auto_detect_coordinate_units=bool_config(
+                        service.get("auto_detect_coordinate_units"),
+                        default=True,
+                    ),
+                    request_width=request_width,
+                    request_height=request_height,
+                )
                 confidence = result.get("score", prediction_score)
                 if confidence is not None:
                     confidence = float(confidence)
@@ -166,7 +292,8 @@ def labelstudio_payload_to_objects(
                             "generation_params": {
                                 "detector_backend": "vlm_labelstudio_detector",
                                 "output_contract": "AutoLabelSample.objects[]",
-                                "source_format": "labelstudio_percent_rectangle",
+                                "source_format": "labelstudio_rectangle",
+                                "coordinate_unit": coordinate_unit,
                                 "prompt_version": service.get("prompt_version"),
                                 "target_label": label,
                                 "source_result_id": source_result_id,
@@ -174,6 +301,8 @@ def labelstudio_payload_to_objects(
                                 "converted_xyxy_box": box,
                                 "image_width": width,
                                 "image_height": height,
+                                "request_image_width": request_width or width,
+                                "request_image_height": request_height or height,
                                 "source_image_uri": image_uri,
                                 "raw_response": raw_response,
                             },
@@ -205,7 +334,7 @@ class VLMLabelStudioDetector:
             raise RuntimeError("VLM detector model_name is not configured.")
 
         width, height = get_image_size(image_uri)
-        image_url = self._image_url(image_uri)
+        image_url, request_width, request_height = self._image_payload(image_uri, width, height)
         prompt = self.service.get("prompt")
         if not prompt:
             raise RuntimeError("VLM detector prompt is not configured.")
@@ -237,14 +366,17 @@ class VLMLabelStudioDetector:
             height=height,
             service=self.service,
             raw_response=payload if self.service.get("store_raw_response", False) else None,
+            request_width=request_width,
+            request_height=request_height,
         )
 
-    def _image_url(self, image_uri: str) -> str:
+    def _image_payload(self, image_uri: str, width: int, height: int) -> tuple[str, int, int]:
         if image_uri.startswith("http://") or image_uri.startswith("https://") or image_uri.startswith("data:"):
-            return image_uri
+            return image_uri, width, height
         max_side = self.service.get("request_image_max_side")
         max_side = int(max_side) if max_side not in (None, "") else None
-        return image_to_data_url(Path(image_uri), max_side=max_side)
+        request_width, request_height = resized_dimensions(width, height, max_side)
+        return image_to_data_url(Path(image_uri), max_side=max_side), request_width, request_height
 
     def _request_json_text(self, client: Any, model_name: str, image_url: str, prompt: str) -> str:
         messages = [
