@@ -152,6 +152,7 @@ models:
         base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
         temperature: 0.0
         max_tokens: 2000
+        request_image_max_side: 1280
         use_response_format: true
         response_format_type: json_object
         system_message: |
@@ -224,6 +225,11 @@ direct_annotation:
   default_task_key: ppe_person
   crop_expand_ratio: 0.05
   min_box_confidence: 0.0
+  min_box_width: 4
+  min_box_height: 4
+  min_box_area: 16
+  max_box_aspect_ratio: 20.0
+  cleanup_existing_crops: true
   batch_size: 1
   workers: 1
   json_retry_attempts: 3
@@ -265,6 +271,10 @@ classification:
     - generated
   delay_seconds: 0.5
   max_tokens: 2000
+  request_image_max_side: 1024
+  min_crop_width: 4
+  min_crop_height: 4
+  max_crop_aspect_ratio: 20.0
   parse_retry_count: 0
   use_response_format: true
   text_fallback_enabled: false

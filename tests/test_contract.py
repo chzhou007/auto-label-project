@@ -22,6 +22,7 @@ from autolabel.model_config import build_detector_runtime_config, resolve_classi
 from autolabel.modules.classification.dry_run import DryRunClassificationModule
 from autolabel.preprocess import estimate_extracted_frame_count
 from autolabel.exporters.labelstudio import build_labelstudio_config, sample_to_labelstudio_task
+from autolabel.sample_factory import make_object
 from autolabel.utils import read_json, write_csv, write_json
 from autolabel.validators import validate_sample_contract
 
@@ -94,6 +95,26 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(parsed["safety_shoes"])
         self.assertIn("safety_shoes", parsed["notes"])
 
+    def test_builtin_classifier_skips_invalid_crop_geometry(self) -> None:
+        from PIL import Image
+
+        module = load_builtin_classification_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            crop_path = Path(tmp) / "thin.jpg"
+            Image.new("RGB", (351, 1), color=(255, 255, 255)).save(crop_path)
+            raw = module.process_image(
+                crop_path,
+                client=None,
+                classifier_config={
+                    "min_crop_width": 4,
+                    "min_crop_height": 4,
+                    "max_crop_aspect_ratio": 20.0,
+                },
+            )
+            self.assertEqual(raw["error"], "invalid_crop_geometry")
+            self.assertEqual(raw["image_width"], 351)
+            self.assertEqual(raw["image_height"], 1)
+
     def test_labelstudio_export_shape(self) -> None:
         sample = read_json(ROOT / "schemas" / "autolabel_sample.example.json")
         task = sample_to_labelstudio_task(sample)
@@ -127,11 +148,16 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["parse_retry_count"], 0)
         self.assertTrue(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["fail_on_parse_error"])
         self.assertTrue(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["use_response_format"])
+        self.assertEqual(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["request_image_max_side"], 1280)
         self.assertEqual(
             detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["response_format_type"],
             "json_object",
         )
         self.assertEqual(classification["max_tokens"], 2000)
+        self.assertEqual(classification["request_image_max_side"], 1024)
+        self.assertEqual(classification["min_crop_width"], 4)
+        self.assertEqual(classification["min_crop_height"], 4)
+        self.assertEqual(classification["max_crop_aspect_ratio"], 20.0)
         self.assertEqual(classification["parse_retry_count"], 0)
         self.assertTrue(classification["use_response_format"])
         self.assertFalse(classification["text_fallback_enabled"])
@@ -140,6 +166,11 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(direct["batch_size"], 1)
         self.assertEqual(direct["workers"], 1)
         self.assertEqual(direct["json_retry_attempts"], 3)
+        self.assertEqual(direct["min_box_width"], 4)
+        self.assertEqual(direct["min_box_height"], 4)
+        self.assertEqual(direct["min_box_area"], 16)
+        self.assertEqual(direct["max_box_aspect_ratio"], 20.0)
+        self.assertTrue(direct["cleanup_existing_crops"])
         self.assertFalse(direct["crop_review"]["enabled"])
         self.assertEqual(direct["crop_review"]["model_ref"], "ppe_person_vlm_labelstudio_detector")
         self.assertEqual(build_crop_review_config(config, detector), {"enabled": False})
@@ -381,6 +412,111 @@ class ContractTests(unittest.TestCase):
         validate_sample_contract(sample)
         self.assertEqual(sample["objects"][0]["classification"]["classifier_name"], "dry_run_rule_classifier")
         self.assertTrue(sample["objects"][0]["classification"]["multi_labels"])
+
+    def test_direct_pipeline_filters_bad_boxes_and_cleans_stale_crops(self) -> None:
+        from PIL import Image
+
+        from autolabel.pipeline import run_direct_pipeline
+
+        class TinyAndValidDetector:
+            def __init__(self, _config: dict) -> None:
+                pass
+
+            def detect(self, _image_uri: str, _task_key: str | None = None) -> list[dict]:
+                return [
+                    make_object(
+                        object_id="person_tiny",
+                        object_type="person",
+                        box={"format": "xyxy", "x1": 1, "y1": 1, "x2": 2, "y2": 2},
+                        geometry_source="detector",
+                        geometry_model={"model_name": "test", "model_version": "1", "confidence": 0.9},
+                    ),
+                    make_object(
+                        object_id="person_valid",
+                        object_type="person",
+                        box={"format": "xyxy", "x1": 10, "y1": 10, "x2": 40, "y2": 70},
+                        geometry_source="detector",
+                        geometry_model={"model_name": "test", "model_version": "1", "confidence": 0.9},
+                    ),
+                    make_object(
+                        object_id="person_thin",
+                        object_type="person",
+                        box={"format": "xyxy", "x1": 50, "y1": 1, "x2": 54, "y2": 79},
+                        geometry_source="detector",
+                        geometry_model={"model_name": "test", "model_version": "1", "confidence": 0.9},
+                    ),
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "image.jpg"
+            Image.new("RGB", (100, 80), color=(255, 255, 255)).save(image_path)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_tiny_crop",
+                        "image_id": "image_tiny_crop",
+                        "image_uri": str(image_path),
+                        "source_type": "manual_upload",
+                        "task_mode": "direct",
+                        "width": 100,
+                        "height": 80,
+                    }
+                ],
+                [
+                    "sample_id",
+                    "image_id",
+                    "image_uri",
+                    "source_type",
+                    "task_mode",
+                    "width",
+                    "height",
+                ],
+            )
+
+            pipeline_config = {
+                "pipeline_id": "test_pipeline",
+                "pipeline_version": "test",
+                "direct_annotation": {
+                    "default_task_key": "ppe_person",
+                    "min_box_confidence": 0.0,
+                    "min_box_width": 4,
+                    "min_box_height": 4,
+                    "min_box_area": 16,
+                    "max_box_aspect_ratio": 10.0,
+                    "cleanup_existing_crops": True,
+                    "json_retry_attempts": 3,
+                    "batch_size": 1,
+                    "workers": 1,
+                },
+                "classification": {"enabled": False},
+                "export": {"export_format": "labelstudio", "export_status": "not_exported"},
+            }
+            detector_config = {"default_task_key": "ppe_person", "services": {"ppe_person": {}}}
+            output_root = root / "processed"
+            stale_tiny_crop = output_root / "crops" / "sample_tiny_crop_person_tiny.jpg"
+            stale_tiny_crop.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (1, 1), color=(0, 0, 0)).save(stale_tiny_crop)
+
+            with patch("autolabel.pipeline.DetectorServiceClient", TinyAndValidDetector):
+                written = run_direct_pipeline(
+                    manifest_path,
+                    pipeline_config,
+                    detector_config,
+                    output_root,
+                    classify=False,
+                )
+
+            self.assertEqual(len(written), 1)
+            sample = read_json(written[0])
+            self.assertEqual([obj["object_id"] for obj in sample["objects"]], ["person_valid"])
+            self.assertFalse(stale_tiny_crop.exists())
+            valid_crop = output_root / "crops" / "sample_tiny_crop_person_valid.jpg"
+            self.assertTrue(valid_crop.exists())
+            with Image.open(valid_crop) as crop:
+                self.assertEqual(crop.size, (30, 60))
 
     def test_direct_pipeline_does_not_write_metadata_after_json_parse_failures(self) -> None:
         from PIL import Image

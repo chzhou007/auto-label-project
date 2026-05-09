@@ -60,6 +60,10 @@ class ClassificationScriptAdapter:
         prompt_version: str | None = None,
         delay_seconds: float = 0.5,
         max_tokens: int | None = None,
+        request_image_max_side: int | None = None,
+        min_crop_width: int | None = None,
+        min_crop_height: int | None = None,
+        max_crop_aspect_ratio: float | None = None,
         parse_retry_count: int | None = None,
         use_response_format: bool | None = None,
         text_fallback_enabled: bool | None = None,
@@ -75,6 +79,10 @@ class ClassificationScriptAdapter:
         self.prompt_version = prompt_version
         self.delay_seconds = delay_seconds
         self.max_tokens = max_tokens
+        self.request_image_max_side = request_image_max_side
+        self.min_crop_width = min_crop_width
+        self.min_crop_height = min_crop_height
+        self.max_crop_aspect_ratio = max_crop_aspect_ratio
         self.parse_retry_count = parse_retry_count
         self.use_response_format = use_response_format
         self.text_fallback_enabled = text_fallback_enabled
@@ -95,6 +103,16 @@ class ClassificationScriptAdapter:
             prompt_version=config.get("prompt_version"),
             delay_seconds=float(config.get("delay_seconds", 0.5)),
             max_tokens=int(config["max_tokens"]) if config.get("max_tokens") not in (None, "") else None,
+            request_image_max_side=(
+                int(config["request_image_max_side"]) if config.get("request_image_max_side") not in (None, "") else None
+            ),
+            min_crop_width=int(config["min_crop_width"]) if config.get("min_crop_width") not in (None, "") else None,
+            min_crop_height=int(config["min_crop_height"]) if config.get("min_crop_height") not in (None, "") else None,
+            max_crop_aspect_ratio=(
+                float(config["max_crop_aspect_ratio"])
+                if config.get("max_crop_aspect_ratio") not in (None, "")
+                else None
+            ),
             parse_retry_count=(
                 int(config["parse_retry_count"]) if config.get("parse_retry_count") not in (None, "") else None
             ),
@@ -154,7 +172,15 @@ class ClassificationScriptAdapter:
             "delay_seconds": self.delay_seconds,
         }
         if self.max_tokens is not None:
-            config["max_tokens"] = self.max_tokens
+            config["max_tokens"] = max(1, self.max_tokens)
+        if self.request_image_max_side is not None:
+            config["request_image_max_side"] = self.request_image_max_side
+        if self.min_crop_width is not None:
+            config["min_crop_width"] = self.min_crop_width
+        if self.min_crop_height is not None:
+            config["min_crop_height"] = self.min_crop_height
+        if self.max_crop_aspect_ratio is not None:
+            config["max_crop_aspect_ratio"] = self.max_crop_aspect_ratio
         if self.parse_retry_count is not None:
             config["parse_retry_count"] = self.parse_retry_count
         if self.use_response_format is not None:

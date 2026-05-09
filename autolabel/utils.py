@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import base64
+import io
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -64,8 +65,9 @@ def get_image_size(path: str | Path) -> tuple[int, int]:
         return image.size
 
 
-def image_to_data_url(path: str | Path) -> str:
-    suffix = Path(path).suffix.lower()
+def image_to_data_url(path: str | Path, max_side: int | None = None, jpeg_quality: int = 90) -> str:
+    source = Path(path)
+    suffix = source.suffix.lower()
     mime_map = {
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
@@ -74,7 +76,24 @@ def image_to_data_url(path: str | Path) -> str:
         ".bmp": "image/bmp",
     }
     mime = mime_map.get(suffix, "image/jpeg")
-    with open(path, "rb") as f:
+
+    if max_side is not None and max_side > 0:
+        try:
+            from PIL import Image
+        except Exception as exc:
+            raise RuntimeError("Pillow is required to resize images for VLM requests.") from exc
+        with Image.open(source) as image:
+            width, height = image.size
+            if max(width, height) > max_side:
+                scale = max_side / float(max(width, height))
+                resized_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+                image = image.resize(resized_size, Image.Resampling.LANCZOS)
+                buffer = io.BytesIO()
+                image.convert("RGB").save(buffer, format="JPEG", quality=jpeg_quality)
+                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+                return f"data:image/jpeg;base64,{encoded}"
+
+    with open(source, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("ascii")
     return f"data:{mime};base64,{encoded}"
 

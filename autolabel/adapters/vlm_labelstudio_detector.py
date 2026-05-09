@@ -242,7 +242,9 @@ class VLMLabelStudioDetector:
     def _image_url(self, image_uri: str) -> str:
         if image_uri.startswith("http://") or image_uri.startswith("https://") or image_uri.startswith("data:"):
             return image_uri
-        return image_to_data_url(Path(image_uri))
+        max_side = self.service.get("request_image_max_side")
+        max_side = int(max_side) if max_side not in (None, "") else None
+        return image_to_data_url(Path(image_uri), max_side=max_side)
 
     def _request_json_text(self, client: Any, model_name: str, image_url: str, prompt: str) -> str:
         messages = [
@@ -274,7 +276,7 @@ class VLMLabelStudioDetector:
                 "model": model_name,
                 "messages": messages,
                 "temperature": float(self.service.get("temperature", 0.0)),
-                "max_tokens": int(self.service.get("max_tokens", 2000)),
+                "max_tokens": max(1, int(self.service.get("max_tokens", 2000))),
             }
             if with_response_format:
                 kwargs["response_format"] = {

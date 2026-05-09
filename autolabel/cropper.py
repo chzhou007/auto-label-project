@@ -5,6 +5,18 @@ from typing import Any
 
 from .sample_factory import make_box
 
+CROP_FILE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+
+def cleanup_sample_crops(crop_dir: str | Path, sample_id: str) -> None:
+    target_dir = Path(crop_dir)
+    if not target_dir.exists():
+        return
+    prefix = f"{sample_id}_"
+    for path in target_dir.iterdir():
+        if path.is_file() and path.name.startswith(prefix) and path.suffix.lower() in CROP_FILE_SUFFIXES:
+            path.unlink()
+
 
 def expand_box(box: dict[str, Any], width: int, height: int, ratio: float) -> dict[str, int | str]:
     x1, y1, x2, y2 = int(box["x1"]), int(box["y1"]), int(box["x2"]), int(box["y2"])

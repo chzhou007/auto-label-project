@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import os
 import re
@@ -29,6 +30,10 @@ DEFAULT_API_URL = os.getenv("QWEN397B_API_URL", "https://deepseek.gds-services.c
 DEFAULT_API_KEY = os.getenv("QWEN397B_API_KEY", "")
 DEFAULT_MODEL = os.getenv("QWEN397B_MODEL", "aios-smart-eye-vlm")
 DEFAULT_MAX_TOKENS = int(os.getenv("QWEN397B_MAX_TOKENS", "2000"))
+DEFAULT_REQUEST_IMAGE_MAX_SIDE = int(os.getenv("QWEN397B_REQUEST_IMAGE_MAX_SIDE", "1024"))
+DEFAULT_MIN_CROP_WIDTH = int(os.getenv("QWEN397B_MIN_CROP_WIDTH", "4"))
+DEFAULT_MIN_CROP_HEIGHT = int(os.getenv("QWEN397B_MIN_CROP_HEIGHT", "4"))
+DEFAULT_MAX_CROP_ASPECT_RATIO = float(os.getenv("QWEN397B_MAX_CROP_ASPECT_RATIO", "20.0"))
 DEFAULT_PARSE_RETRY_COUNT = int(os.getenv("QWEN397B_PARSE_RETRY_COUNT", "1"))
 DEFAULT_USE_RESPONSE_FORMAT = os.getenv("QWEN397B_USE_RESPONSE_FORMAT", "1").lower() not in {"0", "false", "no"}
 DEFAULT_LOG_PARSE_FALLBACK = os.getenv("QWEN397B_LOG_PARSE_FALLBACK", "0").lower() in {"1", "true", "yes"}
@@ -122,6 +127,26 @@ def utc_now() -> str:
 def encode_image(image_path: str | Path) -> str:
     with open(image_path, "rb") as img_file:
         return base64.b64encode(img_file.read()).decode("utf-8")
+
+
+def image_to_data_url(image_path: str | Path, max_side: int | None = None) -> str:
+    try:
+        from PIL import Image
+    except ImportError:
+        return f"data:{get_image_mime_type(image_path)};base64,{encode_image(image_path)}"
+
+    source = Path(image_path)
+    with Image.open(source) as image:
+        width, height = image.size
+        if max_side and max(width, height) > max_side:
+            scale = max_side / float(max(width, height))
+            resized_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+            image = image.resize(resized_size, Image.Resampling.LANCZOS)
+            buffer = io.BytesIO()
+            image.convert("RGB").save(buffer, format="JPEG", quality=90)
+            encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            return f"data:image/jpeg;base64,{encoded}"
+    return f"data:{get_image_mime_type(source)};base64,{encode_image(source)}"
 
 
 def get_image_mime_type(image_path: str | Path) -> str:
@@ -242,6 +267,40 @@ def _bool_config(config: dict[str, Any], key: str, default: bool) -> bool:
     return str(value).lower() in {"1", "true", "yes"}
 
 
+def crop_geometry(image_path: str | Path) -> tuple[int, int]:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required to validate crop geometry.") from exc
+    with Image.open(image_path) as image:
+        return image.size
+
+
+def invalid_crop_response(image_path: str | Path, reason: str, width: int | None = None, height: int | None = None) -> dict[str, Any]:
+    notes = {key: reason for key in CLASSIFICATION_KEYS}
+    return {
+        **{key: False for key in CLASSIFICATION_KEYS},
+        "notes": notes,
+        "error": "invalid_crop_geometry",
+        "crop_uri": str(image_path),
+        "image_width": width,
+        "image_height": height,
+    }
+
+
+def validate_crop_geometry(image_path: str | Path, classifier_config: dict[str, Any]) -> dict[str, Any] | None:
+    min_width = int(classifier_config.get("min_crop_width", DEFAULT_MIN_CROP_WIDTH))
+    min_height = int(classifier_config.get("min_crop_height", DEFAULT_MIN_CROP_HEIGHT))
+    max_aspect_ratio = float(classifier_config.get("max_crop_aspect_ratio", DEFAULT_MAX_CROP_ASPECT_RATIO))
+    width, height = crop_geometry(image_path)
+    if width < min_width or height < min_height:
+        return invalid_crop_response(image_path, "crop 尺寸过小，跳过 VLM 分类", width, height)
+    aspect_ratio = max(width / height, height / width)
+    if max_aspect_ratio > 0 and aspect_ratio > max_aspect_ratio:
+        return invalid_crop_response(image_path, "crop 长宽比异常，跳过 VLM 分类", width, height)
+    return None
+
+
 def request_classification_text(
     client: OpenAI,
     image_url: str,
@@ -265,7 +324,7 @@ def request_classification_text(
         kwargs = {
             "model": DEFAULT_MODEL,
             "messages": messages,
-            "max_tokens": max_tokens,
+            "max_tokens": max(1, max_tokens),
             "temperature": 0.0,
         }
         if with_response_format:
@@ -294,6 +353,7 @@ def process_image(
     raw_output = ""
     classifier_config = classifier_config or {}
     max_tokens = int(classifier_config.get("max_tokens", DEFAULT_MAX_TOKENS))
+    request_image_max_side = int(classifier_config.get("request_image_max_side", DEFAULT_REQUEST_IMAGE_MAX_SIDE))
     parse_retry_count = int(classifier_config.get("parse_retry_count", DEFAULT_PARSE_RETRY_COUNT))
     use_response_format = _bool_config(classifier_config, "use_response_format", DEFAULT_USE_RESPONSE_FORMAT)
     log_parse_fallback = _bool_config(classifier_config, "log_parse_fallback", DEFAULT_LOG_PARSE_FALLBACK)
@@ -303,7 +363,11 @@ def process_image(
         DEFAULT_TEXT_FALLBACK_ENABLED,
     )
     try:
-        image_url = f"data:{get_image_mime_type(image_path)};base64,{encode_image(image_path)}"
+        invalid_response = validate_crop_geometry(image_path, classifier_config)
+        if invalid_response is not None:
+            print(f"  !! 跳过无效 crop: {invalid_response['image_width']}x{invalid_response['image_height']}")
+            return invalid_response
+        image_url = image_to_data_url(image_path, max_side=request_image_max_side)
         prompts = ["请按照系统提示分析这张人体检测框裁剪图，仅输出规定的纯 JSON 对象。"]
         prompts.extend([JSON_RETRY_USER_PROMPT] * parse_retry_count)
         last_json_error: json.JSONDecodeError | None = None
@@ -386,6 +450,19 @@ def classify_object(
         raw_response = {"error": "missing crop.crop_uri"}
     else:
         raw_response = process_image(crop_uri, client, classifier_config)
+        if raw_response.get("error") == "invalid_crop_geometry":
+            crop = obj.setdefault("crop", {})
+            crop["is_valid_crop"] = False
+            issue_flags = ["invalid_crop_geometry"]
+            obj["quality_check"] = {
+                "qc_sampled": True,
+                "qc_status": "failed",
+                "reviewed_labels": None,
+                "issue_flags": issue_flags,
+                "reviewer": "classification_crop_guard",
+                "review_time": utc_now(),
+                "comment": raw_response.get("notes", {}).get("safety_shoes", "invalid crop geometry"),
+            }
     obj["classification"] = build_autolabel_classification(raw_response, classifier_config)
     return obj
 

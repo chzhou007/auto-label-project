@@ -12,7 +12,7 @@ from .adapters.vlm_labelstudio_detector import VLMJsonParseError
 from .adapters.i2i_generator import load_generated_samples
 from .config_loader import load_config
 from .contract_normalizer import normalize_autolabel_sample
-from .cropper import attach_crops
+from .cropper import attach_crops, cleanup_sample_crops
 from .modules.classification import build_classification_module
 from .sample_factory import make_sample, touch_workflow
 from .utils import get_image_size, read_csv, write_json
@@ -45,8 +45,66 @@ def _positive_int(value: Any, default: int = 1) -> int:
     return parsed
 
 
+def _nonnegative_float(value: Any, default: float = 0.0) -> float:
+    if value in (None, ""):
+        return default
+    parsed = float(value)
+    if parsed < 0:
+        raise ValueError(f"Expected a nonnegative number, got: {value!r}")
+    return parsed
+
+
+def _bool_config(value: Any, default: bool = False) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in {"1", "true", "yes"}
+
+
 def _chunks(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [items[idx : idx + size] for idx in range(0, len(items), size)]
+
+
+def _box_width_height(obj: dict[str, Any]) -> tuple[int, int]:
+    box = obj.get("box", {})
+    return int(box.get("x2", 0)) - int(box.get("x1", 0)), int(box.get("y2", 0)) - int(box.get("y1", 0))
+
+
+def _object_confidence(obj: dict[str, Any]) -> float | None:
+    geometry_model = obj.get("geometry_model") or {}
+    confidence = geometry_model.get("confidence")
+    if confidence is None:
+        return None
+    return float(confidence)
+
+
+def filter_detected_objects(objects: list[dict[str, Any]], direct_cfg: dict[str, Any], sample_id: str) -> list[dict[str, Any]]:
+    min_confidence = _nonnegative_float(direct_cfg.get("min_box_confidence"), 0.0)
+    min_box_width = _nonnegative_float(direct_cfg.get("min_box_width"), 1.0)
+    min_box_height = _nonnegative_float(direct_cfg.get("min_box_height"), 1.0)
+    min_box_area = _nonnegative_float(direct_cfg.get("min_box_area"), 1.0)
+    max_box_aspect_ratio = _nonnegative_float(direct_cfg.get("max_box_aspect_ratio"), 0.0)
+
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for obj in objects:
+        confidence = _object_confidence(obj)
+        if confidence is not None and confidence < min_confidence:
+            dropped += 1
+            continue
+        width, height = _box_width_height(obj)
+        if width < min_box_width or height < min_box_height or width * height < min_box_area:
+            dropped += 1
+            continue
+        if max_box_aspect_ratio and max(width / height, height / width) > max_box_aspect_ratio:
+            dropped += 1
+            continue
+        kept.append(obj)
+
+    if dropped:
+        print(f"  !! {sample_id} 已过滤 {dropped} 个过小或低置信度检测框")
+    return kept
 
 
 MODEL_JSON_PARSE_ERRORS = (VLMJsonParseError, ClassificationJsonParseError)
@@ -118,9 +176,11 @@ def run_direct_pipeline(
     def process_row(row: dict[str, Any]) -> Path:
         sample = make_base_sample(row, workflow_status="raw")
         task_key = row.get("task_key") or direct_cfg.get("default_task_key") or detector_config.get("default_task_key")
-        sample["objects"] = detector().detect(row["image_uri"], task_key)
+        sample["objects"] = filter_detected_objects(detector().detect(row["image_uri"], task_key), direct_cfg, sample["sample_id"])
         touch_workflow(sample, "boxed")
 
+        if _bool_config(direct_cfg.get("cleanup_existing_crops"), default=True):
+            cleanup_sample_crops(crop_dir, sample["sample_id"])
         attach_crops(sample, crop_dir, float(direct_cfg.get("crop_expand_ratio", 0.0)))
         touch_workflow(sample, "cropped")
 

@@ -493,6 +493,27 @@ data/processed/metadata/
 data/processed/crops/
 ```
 
+### 检测框过滤与 crop 清理
+
+VLM 有时会输出极小框或零宽高框，坐标转换层为了满足 `xyxy` 合法性会把它们夹成最小的 `1x1` 像素框。为了避免这些脏框继续生成无效 crop，direct pipeline 会在裁剪前做一层业务过滤：
+
+```yaml
+direct_annotation:
+  min_box_confidence: 0.0
+  min_box_width: 4
+  min_box_height: 4
+  min_box_area: 16
+  max_box_aspect_ratio: 20.0
+  cleanup_existing_crops: true
+```
+
+- `min_box_width` / `min_box_height`：低于最小宽高的框会被丢弃。
+- `min_box_area`：低于最小面积的框会被丢弃。
+- `max_box_aspect_ratio`：过滤极端细长框，避免 Qwen/Qwen-VL 图像预处理在 `smart_resize` 阶段因为长宽比过大报错。
+- `cleanup_existing_crops: true`：重跑同一个 `sample_id` 时，会先删除该样本旧的 crop 文件，再写入本轮有效 crop，避免历史 `1x1` 脏图残留。
+
+如果你确实需要保留极远处的小人，可以把这些阈值调小，例如 `min_box_width: 2`、`min_box_height: 2`、`min_box_area: 4`。
+
 ## 10. 检测/分割模型配置
 
 检测/分割模型分两层配置：`models.geometry.candidates` 维护可选模型，`detector_services.services` 维护任务路由。
@@ -547,6 +568,7 @@ models:
         model_name: ${QWEN_GEOMETRY_MODEL:-aios-smart-eye-vlm}
         credential_ref: qwen_geometry_vlm
         base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+        request_image_max_side: 1280
         use_response_format: true
         response_format_type: json_object
         prompt_version: person_labelstudio_full_body_bbox_v2
@@ -739,6 +761,10 @@ classification:
     - generated
   delay_seconds: 0.5
   max_tokens: 2000
+  request_image_max_side: 1024
+  min_crop_width: 4
+  min_crop_height: 4
+  max_crop_aspect_ratio: 20.0
   parse_retry_count: 0
   use_response_format: true
   text_fallback_enabled: false
@@ -752,6 +778,8 @@ classification:
 - 分类结果会写入 `objects[].classification.multi_labels`。
 - 要换分类大模型，新增 `models.classification.candidates` 条目并修改 `classification.model_key`。
 - `max_tokens` 用于避免模型输出 `notes` 时被截断导致 `Unterminated string`。
+- `request_image_max_side` 会在调用分类 VLM 前压缩 crop 的最长边，降低视觉 token 占用。
+- `min_crop_width` / `min_crop_height` / `max_crop_aspect_ratio` 会在分类前跳过异常 crop，避免 `351x1`、`1x1` 这类图片打到 Qwen 图像处理器。
 - `use_response_format: true` 会优先请求 JSON object 输出；如果后端不支持，代码会自动回退普通调用。
 - `parse_retry_count` 表示分类模块内部 JSON 重试次数；默认交给 direct pipeline 的统一重试队列处理，所以设为 `0`。
 - `text_fallback_enabled: false` 表示分类 JSON 不合法时不再使用文本兜底结果，而是抛出 JSON 解析错误进入重试队列。

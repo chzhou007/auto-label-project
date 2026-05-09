@@ -165,7 +165,9 @@ class VLMCropReviewer:
                 "missing_parts": [],
                 "reason": "dry_run",
             }
-        image_url = image_to_data_url(crop_uri)
+        max_side = self.review_cfg.get("request_image_max_side")
+        max_side = int(max_side) if max_side not in (None, "") else None
+        image_url = image_to_data_url(crop_uri, max_side=max_side)
         raw_text = self._request_json_text(image_url)
         return parse_review_payload(raw_text)
 
@@ -192,7 +194,7 @@ class VLMCropReviewer:
             "model": model_name,
             "messages": messages,
             "temperature": float(self.review_cfg.get("temperature", 0.0)),
-            "max_tokens": int(self.review_cfg.get("max_tokens", 600)),
+            "max_tokens": max(1, int(self.review_cfg.get("max_tokens", 600))),
         }
         if bool_config(self.review_cfg.get("use_response_format"), default=True):
             kwargs["response_format"] = {
