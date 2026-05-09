@@ -152,6 +152,12 @@ models:
         base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
         temperature: 0.0
         max_tokens: 2000
+        use_response_format: true
+        response_format_type: json_object
+        system_message: |
+          You are a strict JSON API for computer-vision annotation.
+          Return only one valid JSON object.
+          Do not output analysis, thinking process, explanations, markdown, bullet points, or any text outside JSON.
         prompt_version: person_labelstudio_full_body_bbox_v2
         parse_retry_count: 0
         fail_on_parse_error: true
@@ -280,43 +286,43 @@ detector_services:
         # Output Format constraints
         1. 你的输出必须是合法的、可解析的 JSON 格式。
         2. 绝对不要输出任何 JSON 代码块之外的解释性文字、问候语或 Markdown 标记（如 ```json）。
-        3. 如果图中没有发现目标，请输出包含空 predictions 的结构（`"result": []`）。
+        3. 绝对不要输出 Thinking Process、分析步骤、编号列表或自然语言解释。
+        4. 输出顶层必须是一个 JSON object，不能是数组。
+        5. 如果图中没有发现目标，请输出包含空 predictions 的结构（`"result": []`）。
 
         # JSON Schema Template
         请严格将你的识别结果填入以下结构中：
 
-        [
-          {
-            "data": {
-              "image": "image.jpg"
-            },
-            "predictions": [
-              {
-                "model_version": "vlm-pre-annotation-v1",
-                "score": 0.95,
-                "result": [
-                  {
-                    "id": "自动生成的唯一ID",
-                    "type": "rectanglelabels",
-                    "from_name": "label",
-                    "to_name": "image",
-                    "image_rotation": 0,
-                    "value": {
-                      "rotation": 0,
-                      "x": 0.0,
-                      "y": 0.0,
-                      "width": 0.0,
-                      "height": 0.0,
-                      "rectanglelabels": [
-                        "Person"
-                      ]
-                    }
+        {
+          "data": {
+            "image": "image.jpg"
+          },
+          "predictions": [
+            {
+              "model_version": "vlm-pre-annotation-v1",
+              "score": 0.95,
+              "result": [
+                {
+                  "id": "自动生成的唯一ID",
+                  "type": "rectanglelabels",
+                  "from_name": "label",
+                  "to_name": "image",
+                  "image_rotation": 0,
+                  "value": {
+                    "rotation": 0,
+                    "x": 0.0,
+                    "y": 0.0,
+                    "width": 0.0,
+                    "height": 0.0,
+                    "rectanglelabels": [
+                      "Person"
+                    ]
                   }
-                ]
-              }
-            ]
-          }
-        ]
+                }
+              ]
+            }
+          ]
+        }
       request:
         image_field: image_uri
         extra_payload:

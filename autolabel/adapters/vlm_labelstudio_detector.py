@@ -17,19 +17,17 @@ PLACEHOLDER_IDS = {
     "id",
 }
 
-JSON_RETRY_PROMPT = """上一次输出不是合法 JSON。请重新分析同一张图，只输出下面这种 JSON 数组，不要解释、不要 markdown、不要自然语言：
-[
-  {
-    "data": {"image": "image.jpg"},
-    "predictions": [
-      {
-        "model_version": "vlm-pre-annotation-v1",
-        "score": 0.95,
-        "result": []
-      }
-    ]
-  }
-]
+JSON_RETRY_PROMPT = """上一次输出不是合法 JSON。请重新分析同一张图，只输出下面这种 JSON 对象，不要解释、不要 markdown、不要自然语言：
+{
+  "data": {"image": "image.jpg"},
+  "predictions": [
+    {
+      "model_version": "vlm-pre-annotation-v1",
+      "score": 0.95,
+      "result": []
+    }
+  ]
+}
 如果没有检测到人员，必须输出 result 为空数组。"""
 
 
@@ -42,6 +40,14 @@ def preview_text(text: str, limit: int = 300) -> str:
     if len(value) > limit:
         return value[: limit - 3].rstrip() + "..."
     return value
+
+
+def bool_config(value: Any, default: bool = False) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in {"1", "true", "yes"}
 
 
 def strip_json_text(text: str) -> str:
@@ -239,34 +245,53 @@ class VLMLabelStudioDetector:
         return image_to_data_url(Path(image_uri))
 
     def _request_json_text(self, client: Any, model_name: str, image_url: str, prompt: str) -> str:
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {
-                    "role": "system",
-                    "content": self.service.get(
-                        "system_message",
-                        "You are a precise computer vision annotation engine. Return valid JSON only. "
-                        "Do not output prose, markdown, or explanations.",
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": image_url},
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
-                    ],
-                },
-            ],
-            temperature=float(self.service.get("temperature", 0.0)),
-            max_tokens=int(self.service.get("max_tokens", 2000)),
-        )
+        messages = [
+            {
+                "role": "system",
+                "content": self.service.get(
+                    "system_message",
+                    "You are a strict JSON API for computer-vision annotation. Return valid JSON only. "
+                    "Do not output prose, markdown, explanations, analysis, or thinking process.",
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
+                    },
+                    {
+                        "type": "text",
+                        "text": prompt,
+                    },
+                ],
+            },
+        ]
+
+        def create(with_response_format: bool) -> Any:
+            kwargs = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": float(self.service.get("temperature", 0.0)),
+                "max_tokens": int(self.service.get("max_tokens", 2000)),
+            }
+            if with_response_format:
+                kwargs["response_format"] = {
+                    "type": self.service.get("response_format_type", "json_object"),
+                }
+            return client.chat.completions.create(**kwargs)
+
+        if bool_config(self.service.get("use_response_format"), default=False):
+            try:
+                response = create(True)
+            except Exception as exc:
+                message = str(exc).lower()
+                if "response_format" not in message and "json_object" not in message and "guided" not in message:
+                    raise
+                response = create(False)
+        else:
+            response = create(False)
         return response.choices[0].message.content or ""
 
     def _detect_dry_run(self, image_uri: str) -> list[dict[str, Any]]:

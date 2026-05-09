@@ -124,6 +124,11 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(detector["services"]["ppe_person"]["model_ref"], "ppe_person_vlm_labelstudio_detector")
         self.assertEqual(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["parse_retry_count"], 0)
         self.assertTrue(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["fail_on_parse_error"])
+        self.assertTrue(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["use_response_format"])
+        self.assertEqual(
+            detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["response_format_type"],
+            "json_object",
+        )
         self.assertEqual(classification["max_tokens"], 2000)
         self.assertEqual(classification["parse_retry_count"], 0)
         self.assertTrue(classification["use_response_format"])
@@ -149,6 +154,41 @@ class ContractTests(unittest.TestCase):
 
     def test_vlm_detector_parse_failure_can_return_none(self) -> None:
         self.assertIsNone(parse_detector_payload("I found one person but cannot provide JSON.", log_error=False))
+
+    def test_vlm_detector_requests_json_object_response_format(self) -> None:
+        from autolabel.adapters.vlm_labelstudio_detector import VLMLabelStudioDetector
+
+        calls = []
+
+        class Message:
+            content = '{"predictions": [{"result": []}]}'
+
+        class Choice:
+            message = Message()
+
+        class Response:
+            choices = [Choice()]
+
+        class Completions:
+            def create(self, **kwargs):
+                calls.append(kwargs)
+                return Response()
+
+        class Chat:
+            completions = Completions()
+
+        class Client:
+            chat = Chat()
+
+        detector = VLMLabelStudioDetector(
+            {
+                "use_response_format": True,
+                "response_format_type": "json_object",
+            }
+        )
+        text = detector._request_json_text(Client(), "aios-smart-eye-vlm", "data:image/jpeg;base64,abc", "prompt")
+        self.assertEqual(text, '{"predictions": [{"result": []}]}')
+        self.assertEqual(calls[0]["response_format"], {"type": "json_object"})
 
     def test_vlm_labelstudio_payload_maps_to_autolabel_objects(self) -> None:
         payload = [
