@@ -38,12 +38,12 @@ class ExternalI2IGenerationModule:
         self.pipeline_config = pipeline_config
         self.module_config = module_config or {}
 
-    def prepare_tasks(self, tasks_csv: str | Path, output_root: str | Path) -> Path:
+    def prepare_tasks(self, tasks_csv: str | Path, output_root: str | Path) -> Path | None:
         rows = read_csv(tasks_csv)
         if any("task_mode" in row for row in rows):
             rows = [row for row in rows if row.get("task_mode") == "generation"]
         if not rows:
-            raise ValueError("No generation rows found for generation module.")
+            return None
 
         target = Path(output_root) / "generation_tasks.filtered.csv"
         write_csv(target, rows, I2I_TASK_FIELDS)
@@ -59,12 +59,20 @@ class ExternalI2IGenerationModule:
         limit: int | None = None,
     ) -> GenerationRunResult:
         generation_cfg = self.pipeline_config.get("generation", {})
+        filtered_tasks = self.prepare_tasks(tasks_csv, output_root)
+        if filtered_tasks is None:
+            return GenerationRunResult(
+                returncode=0,
+                output_root=Path(output_root),
+                stdout="No generation rows found; skipped generation module.\n",
+                skipped=True,
+            )
+
         runtime = resolve_generation_runtime(self.pipeline_config)
         project_dir = (
             self.module_config.get("project_dir")
             or self.pipeline_config.get("paths", {}).get("i2i_project")
         )
-        filtered_tasks = self.prepare_tasks(tasks_csv, output_root)
         runner = I2IGenerator(project_dir)
         completed = runner.run(
             tasks_csv=filtered_tasks,

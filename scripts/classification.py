@@ -142,11 +142,10 @@ def image_to_data_url(image_path: str | Path, max_side: int | None = None) -> st
             scale = max_side / float(max(width, height))
             resized_size = (max(1, round(width * scale)), max(1, round(height * scale)))
             image = image.resize(resized_size, Image.Resampling.LANCZOS)
-            buffer = io.BytesIO()
-            image.convert("RGB").save(buffer, format="JPEG", quality=90)
-            encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            return f"data:image/jpeg;base64,{encoded}"
-    return f"data:{get_image_mime_type(source)};base64,{encode_image(source)}"
+        buffer = io.BytesIO()
+        image.convert("RGB").save(buffer, format="JPEG", quality=90)
+        encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        return f"data:image/jpeg;base64,{encoded}"
 
 
 def get_image_mime_type(image_path: str | Path) -> str:
@@ -295,6 +294,8 @@ def validate_crop_geometry(image_path: str | Path, classifier_config: dict[str, 
     width, height = crop_geometry(image_path)
     if width < min_width or height < min_height:
         return invalid_crop_response(image_path, "crop 尺寸过小，跳过 VLM 分类", width, height)
+    if width <= 0 or height <= 0:
+        return invalid_crop_response(image_path, "crop 尺寸无效，跳过 VLM 分类", width, height)
     aspect_ratio = max(width / height, height / width)
     if max_aspect_ratio > 0 and aspect_ratio > max_aspect_ratio:
         return invalid_crop_response(image_path, "crop 长宽比异常，跳过 VLM 分类", width, height)
@@ -398,8 +399,9 @@ def process_image(
             f"Classification JSON parse failed: {exc}; preview={_clean_note(raw_output, limit=300)}"
         ) from exc
     except Exception as exc:
-        print(f"  !! 调用 API 出错: {exc}")
-        return {"error": str(exc), "raw": raw_output}
+        raise ClassificationJsonParseError(
+            f"Classification API call failed: {exc}; preview={_clean_note(raw_output, limit=300)}"
+        ) from exc
 
 
 def labels_from_boolean_response(raw_response: dict[str, Any]) -> list[dict[str, Any]]:

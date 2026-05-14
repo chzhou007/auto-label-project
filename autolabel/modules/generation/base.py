@@ -11,6 +11,7 @@ class GenerationRunResult:
     output_root: Path
     stdout: str = ""
     stderr: str = ""
+    skipped: bool = False
 
 
 class GenerationModule(Protocol):

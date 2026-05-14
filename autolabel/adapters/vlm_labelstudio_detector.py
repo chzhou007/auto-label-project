@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..sample_factory import make_box, make_object
-from ..utils import get_image_size, image_to_data_url
+from ..utils import get_image_size, image_to_data_url_with_dimensions
 
 
 PLACEHOLDER_IDS = {
@@ -333,8 +333,7 @@ class VLMLabelStudioDetector:
         if not model_name:
             raise RuntimeError("VLM detector model_name is not configured.")
 
-        width, height = get_image_size(image_uri)
-        image_url, request_width, request_height = self._image_payload(image_uri, width, height)
+        image_url, width, height, request_width, request_height = self._image_payload(image_uri)
         prompt = self.service.get("prompt")
         if not prompt:
             raise RuntimeError("VLM detector prompt is not configured.")
@@ -370,13 +369,17 @@ class VLMLabelStudioDetector:
             request_height=request_height,
         )
 
-    def _image_payload(self, image_uri: str, width: int, height: int) -> tuple[str, int, int]:
+    def _image_payload(self, image_uri: str) -> tuple[str, int, int, int, int]:
         if image_uri.startswith("http://") or image_uri.startswith("https://") or image_uri.startswith("data:"):
-            return image_uri, width, height
+            width, height = get_image_size(image_uri)
+            return image_uri, width, height, width, height
         max_side = self.service.get("request_image_max_side")
         max_side = int(max_side) if max_side not in (None, "") else None
-        request_width, request_height = resized_dimensions(width, height, max_side)
-        return image_to_data_url(Path(image_uri), max_side=max_side), request_width, request_height
+        image_url, width, height, request_width, request_height = image_to_data_url_with_dimensions(
+            Path(image_uri),
+            max_side=max_side,
+        )
+        return image_url, width, height, request_width, request_height
 
     def _request_json_text(self, client: Any, model_name: str, image_url: str, prompt: str) -> str:
         messages = [

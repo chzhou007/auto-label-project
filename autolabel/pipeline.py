@@ -33,7 +33,10 @@ def _required_row_value(row: dict[str, Any], key: str) -> str:
 
 def _image_dimensions(row: dict[str, Any]) -> tuple[int, int]:
     if row.get("width") and row.get("height"):
-        return int(row["width"]), int(row["height"])
+        width = int(row["width"])
+        height = int(row["height"])
+        if width > 0 and height > 0:
+            return width, height
     return get_image_size(_required_row_value(row, "image_uri"))
 
 
@@ -95,6 +98,9 @@ def filter_detected_objects(objects: list[dict[str, Any]], direct_cfg: dict[str,
             dropped["low_confidence"] += 1
             continue
         width, height = _box_width_height(obj)
+        if width <= 0 or height <= 0:
+            dropped["invalid_box"] += 1
+            continue
         if width < min_box_width or height < min_box_height or width * height < min_box_area:
             dropped["tiny_box"] += 1
             continue
@@ -116,7 +122,7 @@ def run_direct_pipeline(
     manifest_csv: str | Path,
     pipeline_config: dict[str, Any],
     detector_config: dict[str, Any],
-    output_root: str | Path,
+    output_root: str | Path | None = None,
     classify: bool = True,
     batch_size: int | None = None,
     workers: int | None = None,
@@ -128,9 +134,15 @@ def run_direct_pipeline(
     batch_size = _positive_int(batch_size if batch_size is not None else direct_cfg.get("batch_size"), 1)
     workers = _positive_int(workers if workers is not None else direct_cfg.get("workers"), 1)
     json_retry_attempts = _positive_int(direct_cfg.get("json_retry_attempts"), 3)
-    output = Path(output_root)
-    metadata_dir = output / "metadata"
-    crop_dir = output / "crops"
+    paths = pipeline_config.get("paths", {})
+    if output_root is None:
+        metadata_dir = Path(paths.get("metadata_dir", "data/processed/metadata"))
+        crop_dir = Path(paths.get("crop_dir", str(metadata_dir.parent / "crops")))
+        output = metadata_dir.parent
+    else:
+        output = Path(output_root)
+        metadata_dir = output / "metadata"
+        crop_dir = output / "crops"
     thread_state = threading.local()
 
     def detector() -> DetectorServiceClient:

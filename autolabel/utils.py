@@ -65,7 +65,12 @@ def get_image_size(path: str | Path) -> tuple[int, int]:
         return image.size
 
 
-def image_to_data_url(path: str | Path, max_side: int | None = None, jpeg_quality: int = 90) -> str:
+def image_to_data_url_with_dimensions(
+    path: str | Path,
+    max_side: int | None = None,
+    jpeg_quality: int = 90,
+    force_jpeg: bool = True,
+) -> tuple[str, int, int, int, int]:
     source = Path(path)
     suffix = source.suffix.lower()
     mime_map = {
@@ -77,25 +82,49 @@ def image_to_data_url(path: str | Path, max_side: int | None = None, jpeg_qualit
     }
     mime = mime_map.get(suffix, "image/jpeg")
 
-    if max_side is not None and max_side > 0:
-        try:
-            from PIL import Image
-        except Exception as exc:
-            raise RuntimeError("Pillow is required to resize images for VLM requests.") from exc
-        with Image.open(source) as image:
-            width, height = image.size
-            if max(width, height) > max_side:
-                scale = max_side / float(max(width, height))
-                resized_size = (max(1, round(width * scale)), max(1, round(height * scale)))
-                image = image.resize(resized_size, Image.Resampling.LANCZOS)
-                buffer = io.BytesIO()
-                image.convert("RGB").save(buffer, format="JPEG", quality=jpeg_quality)
-                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-                return f"data:image/jpeg;base64,{encoded}"
+    try:
+        from PIL import Image
+    except Exception as exc:
+        raise RuntimeError("Pillow is required to encode images for VLM requests.") from exc
+
+    with Image.open(source) as image:
+        width, height = image.size
+        request_width, request_height = width, height
+        if max_side is not None and max_side > 0 and max(width, height) > max_side:
+            scale = max_side / float(max(width, height))
+            request_width = max(1, round(width * scale))
+            request_height = max(1, round(height * scale))
+            image = image.resize((request_width, request_height), Image.Resampling.LANCZOS)
+
+        if force_jpeg or (request_width, request_height) != (width, height):
+            buffer = io.BytesIO()
+            image.convert("RGB").save(buffer, format="JPEG", quality=jpeg_quality)
+            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+            return f"data:image/jpeg;base64,{encoded}", width, height, request_width, request_height
 
     with open(source, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("ascii")
-    return f"data:{mime};base64,{encoded}"
+    return f"data:{mime};base64,{encoded}", width, height, width, height
+
+
+def image_to_data_url_with_size(
+    path: str | Path,
+    max_side: int | None = None,
+    jpeg_quality: int = 90,
+    force_jpeg: bool = True,
+) -> tuple[str, int, int]:
+    data_url, _, _, request_width, request_height = image_to_data_url_with_dimensions(
+        path,
+        max_side=max_side,
+        jpeg_quality=jpeg_quality,
+        force_jpeg=force_jpeg,
+    )
+    return data_url, request_width, request_height
+
+
+def image_to_data_url(path: str | Path, max_side: int | None = None, jpeg_quality: int = 90) -> str:
+    data_url, _, _ = image_to_data_url_with_size(path, max_side=max_side, jpeg_quality=jpeg_quality)
+    return data_url
 
 
 def resolve_path(path: str | Path, base_dir: str | Path | None = None) -> Path:

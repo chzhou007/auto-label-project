@@ -30,7 +30,7 @@ from autolabel.preprocess import estimate_extracted_frame_count
 from autolabel.exporters.labelstudio import build_labelstudio_config, sample_to_labelstudio_task
 from autolabel.sample_factory import make_object
 from autolabel.utils import read_json, write_csv, write_json
-from autolabel.validators import validate_sample_contract
+from autolabel.validators import ValidationError, validate_sample_contract
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,6 +120,35 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(raw["error"], "invalid_crop_geometry")
             self.assertEqual(raw["image_width"], 351)
             self.assertEqual(raw["image_height"], 1)
+
+    def test_builtin_classifier_api_error_raises_for_pipeline_retry(self) -> None:
+        from PIL import Image
+
+        module = load_builtin_classification_module()
+
+        class Completions:
+            def create(self, **_kwargs):
+                raise RuntimeError("connection reset")
+
+        class Chat:
+            completions = Completions()
+
+        class Client:
+            chat = Chat()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crop_path = Path(tmp) / "person.jpg"
+            Image.new("RGB", (40, 120), color=(255, 255, 255)).save(crop_path)
+            with self.assertRaises(module.ClassificationJsonParseError):
+                module.process_image(
+                    crop_path,
+                    Client(),
+                    classifier_config={
+                        "min_crop_width": 4,
+                        "min_crop_height": 4,
+                        "max_crop_aspect_ratio": 20.0,
+                    },
+                )
 
     def test_labelstudio_export_shape(self) -> None:
         sample = read_json(ROOT / "schemas" / "autolabel_sample.example.json")
@@ -273,6 +302,37 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(estimate_extracted_frame_count(2500, 30), 84)
         self.assertEqual(estimate_extracted_frame_count(3000, 30, max_frames=10), 10)
 
+    def test_generation_branch_skips_direct_only_manifest(self) -> None:
+        from autolabel.orchestrator import run_generation_branch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "image.jpg"
+            image_path.write_bytes(b"placeholder")
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_direct_only",
+                        "image_id": "image_direct_only",
+                        "image_uri": str(image_path),
+                        "source_type": "manual_upload",
+                        "task_mode": "direct",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "source_type", "task_mode"],
+            )
+            config = {
+                "paths": {
+                    "metadata_dir": str(root / "metadata"),
+                    "image_sequence_dir": str(root),
+                },
+                "modules": {"generation": {"backend": "i2i_external", "backends": {"i2i_external": {}}}},
+            }
+            code = run_generation_branch(config, tasks_csv=manifest_path, output_root=root / "i2i")
+            self.assertEqual(code, 0)
+
     def test_labelstudio_percent_box_converts_to_xyxy_pixels(self) -> None:
         box = percent_box_to_xyxy({"x": 10.0, "y": 20.0, "width": 30.0, "height": 40.0}, 1000, 500)
         self.assertEqual(box, {"format": "xyxy", "x1": 100, "y1": 100, "x2": 400, "y2": 300})
@@ -305,6 +365,17 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(box, {"format": "xyxy", "x1": 800, "y1": 100, "x2": 950, "y2": 300})
         self.assertEqual(coordinate_unit, "labelstudio_percent_xywh")
+
+    def test_image_to_data_url_with_size_uses_one_resized_jpeg_payload(self) -> None:
+        from PIL import Image
+        from autolabel.utils import image_to_data_url_with_size
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "wide.png"
+            Image.new("RGB", (200, 100), color=(255, 0, 0)).save(image_path)
+            data_url, width, height = image_to_data_url_with_size(image_path, max_side=100)
+            self.assertTrue(data_url.startswith("data:image/jpeg;base64,"))
+            self.assertEqual((width, height), (100, 50))
 
     def test_vlm_json_parser_ignores_explanatory_suffix(self) -> None:
         payload = parse_json_output('结果如下：[{"predictions": [{"result": []}]}]\n说明文字')
@@ -425,6 +496,13 @@ class ContractTests(unittest.TestCase):
             "object_id_prefix": "person",
         }
         objects = labelstudio_payload_to_objects(payload, "image.jpg", 1000, 500, service)
+        objects[0]["crop"] = {
+            "crop_id": "person_000001_crop",
+            "crop_uri": "crop.jpg",
+            "crop_box": None,
+            "crop_expand_ratio": None,
+            "is_valid_crop": False,
+        }
         sample = normalize_autolabel_sample(
             {
                 "sample_id": "sample_person_vlm_001",
@@ -458,6 +536,32 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(obj["crop"]["crop_id"], "person_000001_crop")
         self.assertEqual(obj["classification"]["multi_labels"], [])
         self.assertEqual(obj["quality_check"], None)
+
+    def test_validator_rejects_pending_crop_uri(self) -> None:
+        sample = normalize_autolabel_sample(
+            {
+                "sample_id": "sample_pending_crop",
+                "image_asset": {
+                    "image_id": "image_001",
+                    "image_uri": "image.jpg",
+                    "width": 100,
+                    "height": 100,
+                    "source_type": "manual_upload",
+                },
+                "objects": [
+                    make_object(
+                        object_id="person_000001",
+                        object_type="person",
+                        box={"format": "xyxy", "x1": 10, "y1": 10, "x2": 90, "y2": 90},
+                        geometry_source="detector",
+                    )
+                ],
+                "workflow": {"workflow_status": "boxed"},
+                "export": {"export_format": "labelstudio", "export_status": "not_exported"},
+            }
+        )
+        with self.assertRaises(ValidationError):
+            validate_sample_contract(sample)
 
     def test_dry_run_classifier_populates_classification_contract(self) -> None:
         sample = normalize_autolabel_sample(
@@ -596,6 +700,165 @@ class ContractTests(unittest.TestCase):
             self.assertTrue(valid_crop.exists())
             with Image.open(valid_crop) as crop:
                 self.assertEqual(crop.size, (30, 60))
+
+    def test_filter_detected_objects_drops_degenerate_boxes_when_thresholds_are_zero(self) -> None:
+        from autolabel.pipeline import filter_detected_objects
+
+        objects = [
+            make_object(
+                object_id="person_zero_width",
+                object_type="person",
+                box={"format": "xyxy", "x1": 10, "y1": 10, "x2": 10, "y2": 50},
+                geometry_source="detector",
+            ),
+            make_object(
+                object_id="person_valid",
+                object_type="person",
+                box={"format": "xyxy", "x1": 20, "y1": 10, "x2": 40, "y2": 70},
+                geometry_source="detector",
+            ),
+        ]
+        kept = filter_detected_objects(
+            objects,
+            {
+                "min_box_confidence": 0,
+                "min_box_width": 0,
+                "min_box_height": 0,
+                "min_box_area": 0,
+                "max_box_aspect_ratio": 20,
+            },
+            "sample_degenerate",
+        )
+        self.assertEqual([obj["object_id"] for obj in kept], ["person_valid"])
+
+    def test_direct_pipeline_uses_configured_metadata_and_crop_dirs(self) -> None:
+        from PIL import Image
+
+        from autolabel.pipeline import run_direct_pipeline
+
+        class OneBoxDetector:
+            def __init__(self, _config: dict) -> None:
+                pass
+
+            def detect(self, _image_uri: str, _task_key: str | None = None) -> list[dict]:
+                return [
+                    make_object(
+                        object_id="person_valid",
+                        object_type="person",
+                        box={"format": "xyxy", "x1": 10, "y1": 10, "x2": 40, "y2": 70},
+                        geometry_source="detector",
+                    )
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "image.jpg"
+            Image.new("RGB", (100, 80), color=(255, 255, 255)).save(image_path)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_custom_paths",
+                        "image_id": "image_custom_paths",
+                        "image_uri": str(image_path),
+                        "source_type": "manual_upload",
+                        "task_mode": "direct",
+                        "width": 100,
+                        "height": 80,
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "source_type", "task_mode", "width", "height"],
+            )
+            metadata_dir = root / "custom_meta"
+            crop_dir = root / "custom_crops"
+            pipeline_config = {
+                "pipeline_id": "test_pipeline",
+                "pipeline_version": "test",
+                "paths": {
+                    "metadata_dir": str(metadata_dir),
+                    "crop_dir": str(crop_dir),
+                },
+                "direct_annotation": {
+                    "default_task_key": "ppe_person",
+                    "json_retry_attempts": 3,
+                    "batch_size": 1,
+                    "workers": 1,
+                },
+                "classification": {"enabled": False},
+                "export": {"export_format": "labelstudio", "export_status": "not_exported"},
+            }
+            detector_config = {"default_task_key": "ppe_person", "services": {"ppe_person": {}}}
+
+            with patch("autolabel.pipeline.DetectorServiceClient", OneBoxDetector):
+                written = run_direct_pipeline(
+                    manifest_path,
+                    pipeline_config,
+                    detector_config,
+                    classify=False,
+                )
+
+            self.assertEqual(written, [metadata_dir / "sample_custom_paths.json"])
+            self.assertTrue((crop_dir / "sample_custom_paths_person_valid.jpg").exists())
+
+    def test_direct_pipeline_falls_back_to_image_size_when_manifest_dimensions_are_zero(self) -> None:
+        from PIL import Image
+
+        from autolabel.pipeline import run_direct_pipeline
+
+        class NoBoxDetector:
+            def __init__(self, _config: dict) -> None:
+                pass
+
+            def detect(self, _image_uri: str, _task_key: str | None = None) -> list[dict]:
+                return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "image.jpg"
+            Image.new("RGB", (123, 45), color=(255, 255, 255)).save(image_path)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_zero_dims",
+                        "image_id": "image_zero_dims",
+                        "image_uri": str(image_path),
+                        "source_type": "manual_upload",
+                        "task_mode": "direct",
+                        "width": "0",
+                        "height": "0",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "source_type", "task_mode", "width", "height"],
+            )
+            pipeline_config = {
+                "pipeline_id": "test_pipeline",
+                "pipeline_version": "test",
+                "direct_annotation": {
+                    "default_task_key": "ppe_person",
+                    "json_retry_attempts": 3,
+                    "batch_size": 1,
+                    "workers": 1,
+                },
+                "classification": {"enabled": False},
+                "export": {"export_format": "labelstudio", "export_status": "not_exported"},
+            }
+            detector_config = {"default_task_key": "ppe_person", "services": {"ppe_person": {}}}
+
+            with patch("autolabel.pipeline.DetectorServiceClient", NoBoxDetector):
+                written = run_direct_pipeline(
+                    manifest_path,
+                    pipeline_config,
+                    detector_config,
+                    root / "processed",
+                    classify=False,
+                )
+
+            sample = read_json(written[0])
+            self.assertEqual(sample["image_asset"]["width"], 123)
+            self.assertEqual(sample["image_asset"]["height"], 45)
 
     def test_direct_pipeline_does_not_write_metadata_after_json_parse_failures(self) -> None:
         from PIL import Image

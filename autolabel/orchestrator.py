@@ -51,6 +51,8 @@ def run_generation_branch(
         print(result.stderr, file=sys.stderr)
     if result.returncode != 0:
         return result.returncode
+    if getattr(result, "skipped", False):
+        return 0
     if ingest_metadata:
         metadata_dir = paths.get("metadata_dir", "data/processed/metadata")
         written = ingest_generated_metadata(output_root, metadata_dir)
@@ -89,7 +91,7 @@ def run_direct_branch(
         manifest_csv=manifest_csv or default_manifest(config),
         pipeline_config=config,
         detector_config=detector_config,
-        output_root=output_root or default_processed_root(config),
+        output_root=output_root,
         classify=classify,
         batch_size=batch_size,
         workers=workers,

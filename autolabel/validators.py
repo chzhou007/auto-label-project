@@ -86,7 +86,8 @@ def validate_sample_contract(sample: dict[str, Any]) -> None:
         crop = obj.get("crop")
         _require(isinstance(crop, dict), f"{prefix}.crop is required")
         _require_string(crop, "crop_id", f"{prefix}.crop")
-        _require_string(crop, "crop_uri", f"{prefix}.crop")
+        crop_uri = _require_string(crop, "crop_uri", f"{prefix}.crop")
+        _require(crop_uri != "pending", f"{prefix}.crop.crop_uri must be a real crop path, not pending")
         if crop.get("crop_box") is not None:
             validate_box(crop["crop_box"], width, height, f"{prefix}.crop.crop_box")
 
