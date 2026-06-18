@@ -313,7 +313,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 `
   -Workers 32
 ```
 
-`batch_size` 表示每一轮从 manifest 取多少张图进入处理队列；`workers` 表示客户端同时发起多少个样本级任务。对于 OpenAI-compatible / vLLM 服务，通常是多并发请求触发服务端动态 batching，而不是一次 HTTP 请求里塞 512 张图。H20 场景可以先用 `--batch-size 32 --workers 8/16/32` 验证稳定性，再逐步提高到 `--batch-size 512 --workers 32/64`。如果服务端出现 429、连接重置或超时，就先降低 `workers`。分类限速可通过 `classification.delay_seconds: 0` 关闭。
+`batch_size` 表示每一轮从 manifest 取多少张图进入处理队列；`workers` 表示客户端同时发起多少个样本级任务。对于 OpenAI-compatible / vLLM 服务，通常通过多并发请求触发服务端动态 batching，不建议把 512 张图塞进一次 HTTP 请求。H20 场景可以先用 `--batch-size 32 --workers 8/16/32` 验证稳定性，再逐步提高到 `--batch-size 512 --workers 32/64`。如果服务端出现 429、连接重置或超时，就先降低 `workers`。分类限速可通过 `classification.delay_seconds: 0` 关闭。
 
 ## 7. 准备输入数据
 
@@ -335,7 +335,7 @@ data/raw/videos/
 python scripts/run_preprocess.py --config configs/autolabel.yaml
 ```
 
-当前视频抽帧逻辑是按帧序号抽样，不是按秒抽样：`video_frame_stride=30` 表示保存第 `0, 30, 60, ...` 帧。理论抽帧数为：
+当前视频抽帧逻辑按帧序号抽样，不按秒抽样：`video_frame_stride=30` 表示保存第 `0, 30, 60, ...` 帧。理论抽帧数为：
 
 ```text
 floor((视频总帧数 - 1) / video_frame_stride) + 1
@@ -349,7 +349,7 @@ floor((视频总帧数 - 1) / video_frame_stride) + 1
 60 fps: 100 * 60 = 6000 帧，stride=30 -> 200 张
 ```
 
-偏差常见原因包括：视频真实 fps 不是标称 fps、可变帧率 VFR、首尾不足整秒、解码器丢帧或坏帧、`video_max_frames` 截断、以及 GPU/FFmpeg 后端与 OpenCV 后端对损坏帧/时间戳处理不同。
+偏差常见原因包括：视频真实 fps 与标称 fps 不一致、可变帧率 VFR、首尾不足整秒、解码器丢帧或坏帧、`video_max_frames` 截断、以及 GPU/FFmpeg 后端与 OpenCV 后端对损坏帧/时间戳处理不同。
 
 预处理支持 CPU 和 GPU 两种模式，默认保留 CPU：
 
@@ -618,7 +618,7 @@ DAG 内部会自动转换为 `AutoLabelSample.objects[].box` 需要的像素坐�
 
 人体框 prompt 采用完整可见人体优先规则：只要头部可见，框顶必须覆盖到头顶/头盔；只要脚或鞋可见，框底必须覆盖到脚底/鞋底/脚尖。只有脚部确实被画面边缘裁掉、被遮挡或不可见时，才允许输出半身/局部人体框。这个约束用于避免后续 crop 截断脚部，影响 `safety_shoes` 等分类标签。
 
-检测阶段默认启用 `response_format: json_object`，并要求模型输出顶层 JSON object，减少模型输出 Thinking Process/自然语言分析的概率。若 VLM 仍没有按 Label Studio JSON 输出，会抛出可识别的 JSON 解析错误，进入 direct pipeline 的重试队列。重试只是运行时机制：如果后续某次重试成功，最终 metadata 只保留成功那一轮的唯一结果；如果连续 3 次仍不合法，则不写入该样本的最终 metadata，避免把“模型输出格式错误”误当成“图片里没有人”，从而生成无框场景图。
+检测阶段默认启用 `response_format: json_object`，并要求模型输出顶层 JSON object，减少模型输出 Thinking Process/自然语言分析的概率。若 VLM 仍没有按 Label Studio JSON 输出，会抛出可识别的 JSON 解析错误，进入 direct pipeline 的重试队列。重试只是运行时机制：如果后续某次重试成功，最终 metadata 只保留成功那一轮的唯一结果；如果连续 3 次仍不合法，则不写入该样本的最终 metadata，避免把 `模型输出格式错误` 误当成 `图片里没有人`，从而生成无框场景图。
 
 转换后的对象会继续进入 crop 和分类阶段：
 
@@ -795,8 +795,8 @@ classification:
 - `min_crop_width` / `min_crop_height` / `max_crop_aspect_ratio` 会在分类前跳过异常 crop，避免 `351x1`、`1x1` 这类图片打到 Qwen 图像处理器。
 - `use_response_format: true` 会优先请求 JSON object 输出；如果后端不支持，代码会自动回退普通调用。
 - `parse_retry_count` 表示分类模块内部 JSON 重试次数；默认交给 direct pipeline 的统一重试队列处理，所以设为 `0`。
-- `text_fallback_enabled: false` 表示分类 JSON 不合法时不再使用文本兜底结果，而是抛出 JSON 解析错误进入重试队列。
-- `log_parse_fallback: false` 会隐藏“已使用文本兜底解析”的非致命日志；仅当显式开启 `text_fallback_enabled` 时才会用到。
+- `text_fallback_enabled: false` 表示分类 JSON 不合法时直接抛出 JSON 解析错误进入重试队列。
+- `log_parse_fallback: false` 会隐藏 `已使用文本兜底解析` 这类非致命日志；仅当显式开启 `text_fallback_enabled` 时才会用到。
 
 direct pipeline 对检测、可选 crop 复核和分类共用一套 JSON 重试策略：
 
@@ -815,7 +815,7 @@ data/processed/metadata/<sample_id>.json
 
 ## 12. 主输出结构
 
-主输出不是 crop，也不是 Label Studio 结果，而是完整的 `AutoLabelSample`：
+主输出是完整的 `AutoLabelSample`，crop 和 Label Studio 文件都从它派生：
 
 ```text
 data/processed/metadata/<sample_id>.json
@@ -875,7 +875,156 @@ schemas/autolabel_sample.schema.json
 schemas/autolabel_sample.example.json
 ```
 
-## 14. 导出 Label Studio
+## 14. 运行质检 agent
+
+当数据生成或自动化标注任务产出 `AutoLabelSample` metadata 后，可以先运行独立质检 agent。它会检查：
+
+- metadata 契约是否合法；
+- 原图、crop、mask 文件是否存在且尺寸一致；
+- 标注框是否越界、过小、极端长宽比或高度重叠；
+- crop 是否覆盖原标注框；
+- 已有 `objects[].quality_check` 是否存在失败或待复核状态；
+- 可选：用 VLM 看红框叠加图，判断框是否标中了目标。
+
+字段穿透设计见：
+
+```text
+docs/qc_agent_field_design.md
+```
+
+质检报告中的每条 issue 都会带 `field_path`，人工复核 CSV 会展开 `sample_id`、原图、场景、对象、模型、分类、workflow、export、问题字段和路径，方便从质检结论回查到上游数据。
+
+规则质检，不调用大模型：
+
+```powershell
+python scripts/run_qc_agent.py --config configs/autolabel.yaml --metadata-dir data/processed/metadata --sampling-ratio 0.05
+```
+
+如果上游只给了图片或 crop，还没有整理成 `AutoLabelSample`，先跑图片资产级 QC：
+
+```powershell
+python scripts/run_asset_qc.py `
+  --image-dir C:\path\to\image_sequence `
+  --crop-dir C:\path\to\crops `
+  --manifest C:\path\to\manifest.csv `
+  --metadata-dir C:\path\to\metadata `
+  --output-dir data/qc
+```
+
+这个入口会检查图片是否可读、尺寸/比例是否异常，并尽量用 crop 文件名反推原始帧和 manifest 行。它不能替代 metadata 质检，因为它看不到原始框坐标、分类字段和模型来源；它用于把 `只有图片的数据` 也纳入全量资产检查。
+
+如果 metadata 中的图片路径是相对外部输出目录的路径，可以加 `--asset-base-dir`：
+
+```powershell
+python scripts/run_qc_agent.py `
+  --config configs/autolabel.yaml `
+  --metadata-dir C:\path\to\outputs\metadata `
+  --asset-base-dir C:\path\to\outputs `
+  --sampling-ratio 0.05
+```
+
+输出文件：
+
+```text
+data/qc/<qc_run_id>_report.json
+data/qc/<qc_run_id>_manual_review_queue.csv
+```
+
+`report.json` 是机器可读完整结果，`manual_review_queue.csv` 只放失败、疑似问题和抽样样本，便于少量人工二次质检。
+
+如需启用 VLM 语义复核，先配置环境变量，再加 `--enable-vlm`：
+
+```powershell
+$env:QWEN397B_API_KEY="你的 key"
+$env:QWEN_GEOMETRY_MODEL="aios-smart-eye-vlm"
+
+python scripts/run_qc_agent.py --config configs/autolabel.yaml --metadata-dir data/processed/metadata --enable-vlm
+```
+
+## 15. 漏水图片质量筛选
+
+漏水场景里，第一波和第二波二筛目录可以直接交给 Qwen 多模态模型做自动化筛选。推荐按四步跑：
+
+```text
+混合图片池 -> Qwen 初筛 -> 严格复核 -> 视觉校准 -> 图片包交付
+```
+
+详细字段、判定口径和命令见：
+
+```text
+docs/clear_water_image_qc_pipeline.md
+```
+
+H20/Qwen 环境变量只在本地 PowerShell 设置：
+
+```powershell
+$env:QWEN397B_API_KEY="你的 key"
+$env:QWEN_GEOMETRY_MODEL="aios-smart-eye-vlm"
+```
+
+第一波初筛：
+
+```powershell
+python scripts/run_clear_water_filter.py run `
+  --root "C:\Users\19310\Desktop\万国数据实习\异常检测\第一波二筛" `
+  --preset first_wave `
+  --resume `
+  --interval-seconds 6.8
+```
+
+第二波初筛：
+
+```powershell
+python scripts/run_clear_water_filter.py run `
+  --root "C:\Users\19310\Desktop\万国数据实习\异常检测\第二波二筛" `
+  --preset second_wave `
+  --resume `
+  --interval-seconds 6.8
+```
+
+严格二筛会在 Qwen 候选样本上重新问一次更保守的 prompt，并自动搜索不超过目标通过率的规则：
+
+```powershell
+python scripts/run_clear_water_strict_verifier.py `
+  --input-csv C:\path\to\second_wave_v3_recall_balanced_latest.csv `
+  --only-selected `
+  --auto-zero-negative `
+  --target-max-rate 0.65 `
+  --workers 4 `
+  --resume
+```
+
+视觉校准器用于批次内一致性控制。它只把文件夹标签用于离线训练和阈值选择，运行时按图片特征给候选样本打分：
+
+```powershell
+python scripts/run_clear_water_visual_calibrator.py `
+  --full-csv C:\path\to\second_wave_full_pool.csv `
+  --candidate-csv C:\path\to\second_wave_strict_latest.csv `
+  --target-denominator 728 `
+  --target-max-rate 0.65 `
+  --require-vlm-accept `
+  --build-pack
+```
+
+如需整理给人工或带教复核的图片包：
+
+```powershell
+python scripts/run_clear_water_filter.py build-pack `
+  --csv C:\path\to\second_wave_clear_water_v5_visual_calibrated_latest.csv `
+  --selected-only
+```
+
+主要输出：
+
+```text
+*_latest.csv
+*_latest_selected.csv
+*_latest_rejected.csv
+*_latest_summary.md
+visual_calibrated_selected_pack_<N>.zip
+```
+
+## 16. 导出 Label Studio
 
 导出命令：
 
@@ -895,7 +1044,7 @@ data/exports/labelstudio/import.json
 python scripts/export_labelstudio.py --config configs/autolabel.yaml --update-samples
 ```
 
-## 15. 测试
+## 17. 测试
 
 运行基础测试：
 
@@ -909,7 +1058,7 @@ python -m unittest discover -s tests
 python -m compileall autolabel scripts tests
 ```
 
-## 16. 常见问题
+## 18. 常见问题
 
 ### 1. YAML 无法读取
 

@@ -309,7 +309,7 @@ detector_services:
         2. **次高优先级（可见部分最大化）**：如果人物下半身被遮挡（如被机柜、设备挡住）或因图像边缘截断导致脚部不可见，则**优先尽可能完整地框选当前所有可见的人体部分**。
 
         # Coordinate Rules (Label Studio Standard)
-        Label Studio 要求的边界框坐标必须是基于图像宽高的**百分比 (0.0 - 100.0)**，而不是绝对像素值：
+        Label Studio 要求的边界框坐标必须是基于图像宽高的**百分比 (0.0 - 100.0)**，不要填绝对像素值：
         1. `x`: 边界框左上角 X 坐标占图像总宽度的百分比。
         2. `y`: 边界框左上角 Y 坐标占图像总高度的百分比。
         3. `width`: 边界框宽度占图像总宽度的百分比。
@@ -401,6 +401,46 @@ qc_policy:
   sampling_method: random
   fail_policy: batch_rework
   qc_batch_id: null
+
+# 标注完成后的独立质检 agent。它读取 AutoLabelSample metadata，
+# 先做文件/结构/几何/crop/mask 规则校验，再按风险或抽样生成少量人工复核队列。
+qc_agent:
+  output_dir: data/qc
+  manual_sampling_ratio: 0.05
+  random_seed: 20260601
+  rules:
+    check_image_dimensions: true
+    require_crop_file: true
+    min_box_width: 4
+    min_box_height: 4
+    min_box_area: 16
+    max_box_aspect_ratio: 20.0
+    min_crop_width: 4
+    min_crop_height: 4
+    max_crop_aspect_ratio: 20.0
+    crop_size_tolerance_px: 2
+    duplicate_iou_threshold: 0.98
+    require_classification_labels: false
+    require_mask_for_generated: false
+    check_generation_region_alignment: true
+    generation_region_tolerance_px: 2
+    min_selected_grid_iou: 0.01
+    check_mask_box_alignment: true
+    min_mask_box_iou: 0.35
+    min_mask_coverage_by_box: 0.8
+    max_mask_box_center_shift_ratio: 0.5
+    max_mask_box_area_ratio: 5.0
+  vlm_review:
+    enabled: false
+    model_ref: ppe_person_vlm_labelstudio_detector
+    reviewer: vlm_annotation_qc_agent
+    prompt_version: annotation_qc_v1
+    request_image_max_side: 1280
+    temperature: 0.0
+    max_tokens: 800
+    use_response_format: true
+    response_format_type: json_object
+    store_raw_response: false
 
 export:
   export_format: labelstudio

@@ -22,14 +22,16 @@ from autolabel.adapters.vlm_labelstudio_detector import (
     parse_json_output,
     percent_box_to_xyxy,
 )
+from autolabel.asset_qc import infer_crop_source, run_asset_qc
 from autolabel.config_loader import load_config
 from autolabel.contract_normalizer import normalize_autolabel_sample
 from autolabel.model_config import build_detector_runtime_config, resolve_classification_runtime, resolve_generation_runtime
 from autolabel.modules.classification.dry_run import DryRunClassificationModule
 from autolabel.preprocess import estimate_extracted_frame_count
 from autolabel.exporters.labelstudio import build_labelstudio_config, sample_to_labelstudio_task
+from autolabel.qc_agent import parse_vlm_qc_payload, run_qc_agent
 from autolabel.sample_factory import make_object
-from autolabel.utils import read_json, write_csv, write_json
+from autolabel.utils import read_csv, read_json, write_csv, write_json
 from autolabel.validators import ValidationError, validate_sample_contract
 
 
@@ -39,6 +41,16 @@ ROOT = Path(__file__).resolve().parents[1]
 def load_builtin_classification_module():
     script_path = ROOT / "scripts" / "classification.py"
     spec = importlib.util.spec_from_file_location("builtin_classification_for_test", script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load script: {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_script_module(script_name: str):
+    script_path = ROOT / "scripts" / script_name
+    spec = importlib.util.spec_from_file_location(script_name.replace(".py", "_for_test"), script_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load script: {script_path}")
     module = importlib.util.module_from_spec(spec)
@@ -931,6 +943,329 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(written, [])
             self.assertFalse((output_root / "metadata" / "sample_bad_json.json").exists())
             self.assertFalse((output_root / "retry_failures" / "sample_bad_json.json").exists())
+
+    def test_qc_agent_passes_valid_sample_and_writes_reports(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "images" / "image.jpg"
+            crop_path = root / "crops" / "person.jpg"
+            image_path.parent.mkdir(parents=True)
+            crop_path.parent.mkdir(parents=True)
+            Image.new("RGB", (100, 80), color=(255, 255, 255)).save(image_path)
+            Image.new("RGB", (30, 60), color=(255, 255, 255)).save(crop_path)
+            sample = normalize_autolabel_sample(
+                {
+                    "sample_id": "sample_qc_valid",
+                    "image_asset": {
+                        "image_id": "image_qc_valid",
+                        "image_uri": "images/image.jpg",
+                        "width": 100,
+                        "height": 80,
+                        "source_type": "manual_upload",
+                    },
+                    "objects": [
+                        make_object(
+                            object_id="person_000001",
+                            object_type="person",
+                            box={"format": "xyxy", "x1": 10, "y1": 10, "x2": 40, "y2": 70},
+                            geometry_source="detector",
+                            crop={
+                                "crop_id": "person_000001_crop",
+                                "crop_uri": "crops/person.jpg",
+                                "crop_box": {"format": "xyxy", "x1": 10, "y1": 10, "x2": 40, "y2": 70},
+                                "crop_expand_ratio": 0.0,
+                                "is_valid_crop": True,
+                            },
+                        )
+                    ],
+                    "workflow": {"workflow_status": "classified"},
+                    "export": {"export_format": "labelstudio", "export_status": "not_exported"},
+                }
+            )
+            metadata_path = root / "metadata" / "sample_qc_valid.json"
+            write_json(metadata_path, sample)
+
+            report = run_qc_agent(
+                pipeline_config={"qc_agent": {"output_dir": str(root / "qc"), "manual_sampling_ratio": 0}},
+                sample_paths=[metadata_path],
+                asset_base_dirs=[root],
+            )
+
+            self.assertEqual(report["summary"]["passed_samples"], 1)
+            self.assertEqual(report["summary"]["manual_review_queue_size"], 0)
+            sample_report = report["samples"][0]
+            self.assertEqual(sample_report["field_snapshot"]["image_asset"]["image_id"], "image_qc_valid")
+            object_report = sample_report["objects"][0]
+            self.assertEqual(object_report["field_snapshot"]["object_type"], "person")
+            self.assertEqual(object_report["field_snapshot"]["crop"]["crop_uri"], "crops/person.jpg")
+            self.assertTrue(Path(report["report_path"]).exists())
+            self.assertTrue(Path(report["manual_review_queue_path"]).exists())
+
+    def test_qc_agent_flags_tiny_box_and_missing_crop(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "images" / "image.jpg"
+            image_path.parent.mkdir(parents=True)
+            Image.new("RGB", (100, 80), color=(255, 255, 255)).save(image_path)
+            sample = normalize_autolabel_sample(
+                {
+                    "sample_id": "sample_qc_bad_crop",
+                    "image_asset": {
+                        "image_id": "image_qc_bad_crop",
+                        "image_uri": "images/image.jpg",
+                        "width": 100,
+                        "height": 80,
+                        "source_type": "manual_upload",
+                    },
+                    "objects": [
+                        make_object(
+                            object_id="person_000001",
+                            object_type="person",
+                            box={"format": "xyxy", "x1": 10, "y1": 10, "x2": 11, "y2": 11},
+                            geometry_source="detector",
+                            crop={
+                                "crop_id": "person_000001_crop",
+                                "crop_uri": "crops/missing.jpg",
+                                "crop_box": {"format": "xyxy", "x1": 10, "y1": 10, "x2": 11, "y2": 11},
+                                "crop_expand_ratio": 0.0,
+                                "is_valid_crop": True,
+                            },
+                        )
+                    ],
+                    "workflow": {"workflow_status": "classified"},
+                    "export": {"export_format": "labelstudio", "export_status": "not_exported"},
+                }
+            )
+            metadata_path = root / "metadata" / "sample_qc_bad_crop.json"
+            write_json(metadata_path, sample)
+
+            report = run_qc_agent(
+                pipeline_config={"qc_agent": {"output_dir": str(root / "qc"), "manual_sampling_ratio": 0}},
+                sample_paths=[metadata_path],
+                asset_base_dirs=[root],
+            )
+
+            self.assertEqual(report["summary"]["failed_samples"], 1)
+            issue_codes = {
+                issue["code"]
+                for obj in report["samples"][0]["objects"]
+                for issue in obj["issues"]
+            }
+            self.assertIn("tiny_box", issue_codes)
+            self.assertIn("crop_file_missing", issue_codes)
+            field_paths = {
+                issue["field_path"]
+                for obj in report["samples"][0]["objects"]
+                for issue in obj["issues"]
+            }
+            self.assertIn("objects[].box", field_paths)
+            self.assertIn("objects[].crop.crop_uri", field_paths)
+            queue_rows = read_csv(report["manual_review_queue_path"])
+            self.assertEqual(queue_rows[0]["object_type"], "person")
+            self.assertEqual(queue_rows[0]["source_type"], "manual_upload")
+            self.assertIn("objects[].box", queue_rows[0]["issue_field_paths"])
+
+    def test_qc_vlm_payload_parser_normalizes_response(self) -> None:
+        parsed = parse_vlm_qc_payload(
+            '结果：{"visible_target": true, "box_quality": "under_inclusive", '
+            '"label_match": true, "needs_human_review": true, '
+            '"issue_flags": ["missing_feet"], "reason": "脚部被红框截断"}'
+        )
+        self.assertTrue(parsed["visible_target"])
+        self.assertEqual(parsed["box_quality"], "under_inclusive")
+        self.assertTrue(parsed["needs_human_review"])
+        self.assertEqual(parsed["issue_flags"], ["missing_feet"])
+
+    def test_asset_qc_maps_crop_filename_to_manifest(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_dir = root / "frames"
+            crop_dir = root / "crops"
+            image_dir.mkdir()
+            crop_dir.mkdir()
+            frame_path = image_dir / "001.mp4_20dc896e_frame_000000.jpg"
+            crop_path = crop_dir / "sample_001.mp4_20dc896e_frame_000000_person_1.jpg"
+            Image.new("RGB", (100, 80), color=(255, 255, 255)).save(frame_path)
+            Image.new("RGB", (30, 60), color=(255, 255, 255)).save(crop_path)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_001.mp4_20dc896e_frame_000000",
+                        "image_id": "001.mp4_20dc896e_frame_000000",
+                        "image_uri": "frames/001.mp4_20dc896e_frame_000000.jpg",
+                        "source_type": "cctv",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "source_type"],
+            )
+
+            crop_info = infer_crop_source(crop_path)
+            self.assertEqual(crop_info["sample_id"], "sample_001.mp4_20dc896e_frame_000000")
+            self.assertEqual(crop_info["object_type"], "person")
+            bbox_info = infer_crop_source(crop_dir / "sample_001.mp4_20dc896e_frame_000000_bbox_2.jpg")
+            self.assertEqual(bbox_info["sample_id"], "sample_001.mp4_20dc896e_frame_000000")
+            self.assertEqual(bbox_info["object_type"], "bbox")
+            bare_info = infer_crop_source(crop_dir / "sample_001.mp4_20dc896e_frame_000000_2.jpg")
+            self.assertEqual(bare_info["sample_id"], "sample_001.mp4_20dc896e_frame_000000")
+            self.assertEqual(bare_info["object_type"], "unknown")
+            bbox_person_info = infer_crop_source(crop_dir / "sample_001.mp4_20dc896e_frame_000000_bbox_person_3.jpg")
+            self.assertEqual(bbox_person_info["sample_id"], "sample_001.mp4_20dc896e_frame_000000")
+            self.assertEqual(bbox_person_info["object_type"], "person")
+
+            report = run_asset_qc(
+                image_paths=[image_dir],
+                crop_paths=[crop_dir],
+                manifest_csv=manifest_path,
+                output_dir=root / "qc",
+            )
+            self.assertEqual(report["summary"]["total_assets"], 2)
+            self.assertEqual(report["summary"]["failed_assets"], 0)
+            crop_record = [item for item in report["assets"] if item["asset_kind"] == "crop"][0]
+            self.assertEqual(crop_record["sample_id"], "sample_001.mp4_20dc896e_frame_000000")
+            self.assertEqual(crop_record["source_type"], "cctv")
+            self.assertEqual(crop_record["object_index"], "1")
+
+    def test_asset_qc_maps_generated_crop_from_metadata(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_dir = root / "generated_images"
+            crop_dir = root / "crops"
+            image_dir.mkdir()
+            crop_dir.mkdir()
+            image_path = image_dir / "sample_000001.png"
+            crop_path = crop_dir / "sample_000001_obj_000001_crop.jpg"
+            Image.new("RGB", (100, 80), color=(255, 255, 255)).save(image_path)
+            Image.new("RGB", (30, 60), color=(255, 255, 255)).save(crop_path)
+            sample = normalize_autolabel_sample(
+                {
+                    "sample_id": "sample_000001",
+                    "image_asset": {
+                        "image_id": "image_generated_001",
+                        "image_uri": "generated_images/sample_000001.png",
+                        "width": 100,
+                        "height": 80,
+                        "source_type": "generated",
+                    },
+                    "objects": [
+                        make_object(
+                            object_id="obj_000001",
+                            object_type="leakage_area",
+                            box={"format": "xyxy", "x1": 10, "y1": 10, "x2": 40, "y2": 70},
+                            geometry_source="synthetic_generator",
+                            crop={
+                                "crop_id": "crop_000001",
+                                "crop_uri": "crops/sample_000001_obj_000001_crop.jpg",
+                                "crop_box": {"format": "xyxy", "x1": 10, "y1": 10, "x2": 40, "y2": 70},
+                                "crop_expand_ratio": 0.0,
+                                "is_valid_crop": True,
+                            },
+                        )
+                    ],
+                    "workflow": {"workflow_status": "classified"},
+                    "export": {"export_format": "labelstudio", "export_status": "not_exported"},
+                }
+            )
+            metadata_dir = root / "metadata"
+            write_json(metadata_dir / "sample_000001.json", sample)
+
+            report = run_asset_qc(
+                image_paths=[image_dir],
+                crop_paths=[crop_dir],
+                metadata_dir=metadata_dir,
+                output_dir=root / "qc",
+            )
+            self.assertEqual(report["summary"]["failed_assets"], 0)
+            self.assertEqual(report["summary"]["needs_human_review_assets"], 0)
+            crop_record = [item for item in report["assets"] if item["asset_kind"] == "crop"][0]
+            self.assertEqual(crop_record["sample_id"], "sample_000001")
+            self.assertEqual(crop_record["object_type"], "leakage_area")
+
+    def test_clear_water_filter_rule_accepts_floor_water_and_rejects_hard_negative(self) -> None:
+        module = load_script_module("run_clear_water_filter.py")
+        accepted, reason = module.selected_by_rule(
+            {
+                "can_see_image": True,
+                "usable": True,
+                "hard_negative_type": "none",
+                "liquid_location": "floor",
+                "floor_clear_water_visible": True,
+                "confidence": 0.82,
+                "evidence_strength": "medium",
+                "decision": "accept_clear_water",
+            },
+            min_confidence=0.55,
+            allow_weak=False,
+        )
+        self.assertTrue(accepted)
+        self.assertEqual(reason, "model_accept_strong_or_medium")
+
+        accepted, reason = module.selected_by_rule(
+            {
+                "can_see_image": True,
+                "usable": True,
+                "hard_negative_type": "wall_water_only",
+                "liquid_location": "wall",
+                "floor_clear_water_visible": False,
+                "confidence": 0.95,
+                "evidence_strength": "strong",
+                "decision": "accept_clear_water",
+            },
+            min_confidence=0.55,
+            allow_weak=True,
+        )
+        self.assertFalse(accepted)
+        self.assertEqual(reason, "hard_negative:wall_water_only")
+
+    def test_visual_calibrator_threshold_keeps_weak_negative_out(self) -> None:
+        import numpy as np
+
+        module = load_script_module("run_clear_water_visual_calibrator.py")
+        rows = [
+            {
+                "folder": "images_floor_clear_water",
+                "decision": "accept_clear_water",
+                "can_see_image": "true",
+                "usable": "true",
+                "floor_clear_water_visible": "true",
+                "hard_negative_type": "none",
+            },
+            {
+                "folder": "images_wall_water",
+                "decision": "accept_clear_water",
+                "can_see_image": "true",
+                "usable": "true",
+                "floor_clear_water_visible": "true",
+                "hard_negative_type": "none",
+            },
+            {
+                "folder": "images_floor_clear_water",
+                "decision": "accept_clear_water",
+                "can_see_image": "true",
+                "usable": "true",
+                "floor_clear_water_visible": "true",
+                "hard_negative_type": "none",
+            },
+        ]
+        threshold, stats = module.choose_threshold(
+            rows,
+            np.asarray([0.91, 0.72, 0.84], dtype=np.float32),
+            require_vlm_accept=True,
+            target_denominator=3,
+            target_max_rate=1.0,
+        )
+        self.assertGreater(threshold, 0.72)
+        self.assertEqual(stats["weak_negative_selected"], 0)
+        self.assertEqual(stats["weak_positive_selected"], 2)
 
 
 if __name__ == "__main__":
