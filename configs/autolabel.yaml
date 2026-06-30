@@ -53,6 +53,8 @@ modules:
       i2i_external:
         project_dir: C:\Users\chang\Documents\数据标注\I2I
         entrypoint: src/main.py
+      vlm_wan_autolabel:
+        module_dir: autolabel/modules/generation
 
   classification:
     backend: external_script
@@ -218,6 +220,12 @@ generation:
   grid_layout: 4x4
   edit_bbox_expand_ratio: 0.2
   crop_expand_ratio: 0.1
+  num_generations_per_candidate: 1
+  max_candidate_grids: 3
+  severity_level: early
+  enable_fine_grid: false
+  enable_vlm_review: false
+  export_labelstudio: false
   workers: 1
   skip_existing: true
   dry_run: false

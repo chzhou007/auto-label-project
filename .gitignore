@@ -7,6 +7,18 @@ __pycache__/
 venv/
 configs/autolabel.local.yaml
 
+# Local handoff notes and generated task manifests.
+DataGen_Handover_Summary.md
+PGCD_instructions.md
+data/tasks_baoshan_water_leak.csv
+data/tasks_A2_A1_water_leak.csv
+
+# Local API keys and machine-specific environment files.
+.env
+.env.local
+autolabel/modules/generation/.env
+autolabel/modules/generation/.env.local
+
 data/raw/images/*
 data/raw/videos/*
 data/staging/image_sequence/*

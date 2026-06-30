@@ -33,7 +33,7 @@ DEFAULT_CLASSIFICATION_CHOICES = {
     "touching_equipment": ["unknown", "touching_equipment", "not_touching_equipment"],
     "fighting": ["unknown", "fighting", "not_fighting"],
     "safety_goggles": ["unknown", "wearing_safety_goggles", "no_safety_goggles"],
-    "anomaly_type": ["unknown", "diesel_leak", "oil_leak", "coolant_leak"],
+    "anomaly_type": ["unknown", "diesel_leak", "oil_leak", "coolant_leak", "water_leak"],
 }
 
 
