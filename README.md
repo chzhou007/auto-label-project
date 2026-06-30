@@ -1014,6 +1014,8 @@ python scripts/run_clear_water_filter.py build-pack `
   --selected-only
 ```
 
+打包默认用硬链接，不会重复复制图片内容；如果只需要清单，可以加 `--file-mode manifest-only`。默认不生成 zip，需要发送图片包时再显式加 `--zip`。
+
 主要输出：
 
 ```text
@@ -1021,7 +1023,7 @@ python scripts/run_clear_water_filter.py build-pack `
 *_latest_selected.csv
 *_latest_rejected.csv
 *_latest_summary.md
-visual_calibrated_selected_pack_<N>.zip
+visual_calibrated_selected_pack_<N>/manifest.csv
 ```
 
 ## 16. 导出 Label Studio

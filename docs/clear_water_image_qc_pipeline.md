@@ -118,6 +118,17 @@ python scripts/run_clear_water_filter.py build-pack `
   --selected-only
 ```
 
+默认打包方式是 `--file-mode hardlink`，同一块磁盘上不会重复占用图片内容空间。如果只想生成清单和预览，不创建图片目录项，可以使用：
+
+```powershell
+python scripts/run_clear_water_filter.py build-pack `
+  --csv "C:\path\to\second_wave_clear_water_v5_visual_calibrated_latest.csv" `
+  --selected-only `
+  --file-mode manifest-only
+```
+
+默认不生成 zip，因为 zip 会重新写入一份图片内容。只有需要发给别人时才加 `--zip`。
+
 ## 判定口径
 
 自动通过样本需要满足这些条件：
@@ -166,7 +177,7 @@ visual_score_below_threshold
 ```text
 *_latest_metadata.json
 visual_calibrated_selected_pack_<N>
-visual_calibrated_selected_pack_<N>.zip
+visual_calibrated_selected_pack_<N>/manifest.csv
 ```
 
 这些文件可以直接作为批次质检记录。给带教汇报时，重点看 `selected_rate`、`weak_negative_selected`、`latency_p50`、`latency_p95` 和 `selection_reason_counts`。

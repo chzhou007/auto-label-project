@@ -694,6 +694,30 @@ def create_contact_sheet(image_paths: list[Path], output: Path) -> Path | None:
     return output
 
 
+def materialize_file(source: Path, dest: Path, *, mode: str, copy_fallback: bool) -> tuple[str, str]:
+    """Expose a file in a pack directory without duplicating bytes unless requested."""
+
+    if mode == "manifest-only":
+        return "", "manifest-only"
+    if dest.exists():
+        dest.unlink()
+    try:
+        if mode == "hardlink":
+            os.link(source, dest)
+        elif mode == "symlink":
+            os.symlink(source, dest)
+        elif mode == "copy":
+            shutil.copy2(source, dest)
+        else:
+            raise ValueError(f"unknown file mode: {mode}")
+        return str(dest), mode
+    except OSError:
+        if copy_fallback and mode != "copy":
+            shutil.copy2(source, dest)
+            return str(dest), "copy_fallback"
+        return "", f"{mode}_failed_manifest_only"
+
+
 def build_pack(args: argparse.Namespace) -> int:
     csv_path = Path(args.csv).resolve()
     out_dir = Path(args.out_dir).resolve() if args.out_dir else csv_path.parent / f"clear_water_selected_pack_{datetime.now():%Y%m%d_%H%M%S}"
@@ -713,17 +737,31 @@ def build_pack(args: argparse.Namespace) -> int:
         target_dir = selected_dir if selected else rejected_dir
         safe_name = f"{row.get('folder', 'unknown')}__{source.name}"
         dest = target_dir / safe_name
-        shutil.copy2(source, dest)
+        pack_file, pack_file_mode = materialize_file(
+            source,
+            dest,
+            mode=args.file_mode,
+            copy_fallback=args.copy_fallback,
+        )
         if selected:
-            selected_paths.append(dest)
-        manifest.append({**row, "pack_file": str(dest), "pack_bucket": target_dir.name})
+            selected_paths.append(Path(pack_file) if pack_file else source)
+        manifest.append(
+            {
+                **row,
+                "source_file": str(source),
+                "pack_file": pack_file,
+                "pack_file_mode": pack_file_mode,
+                "pack_bucket": target_dir.name,
+            }
+        )
 
     write_csv(out_dir / "manifest.csv", manifest)
     create_contact_sheet(selected_paths[: min(len(selected_paths), args.contact_sheet_limit)], out_dir / "selected_contact_sheet.jpg")
-    archive_base = shutil.make_archive(str(out_dir), "zip", out_dir)
     print(f"PACK={out_dir}")
-    print(f"ZIP={archive_base}")
     print(f"MANIFEST={out_dir / 'manifest.csv'}")
+    if args.zip:
+        archive_base = shutil.make_archive(str(out_dir), "zip", out_dir)
+        print(f"ZIP={archive_base}")
     return 0
 
 
@@ -779,6 +817,18 @@ def build_parser() -> argparse.ArgumentParser:
     pack.add_argument("--out-dir", default=None)
     pack.add_argument("--contact-sheet-limit", type=int, default=120)
     pack.add_argument("--selected-only", action="store_true")
+    pack.add_argument(
+        "--file-mode",
+        choices=["hardlink", "symlink", "copy", "manifest-only"],
+        default="hardlink",
+        help="How to expose images in the pack. hardlink avoids duplicate disk usage on the same drive.",
+    )
+    pack.add_argument(
+        "--copy-fallback",
+        action="store_true",
+        help="Copy the source image only if hardlink/symlink creation fails. Default keeps manifest only on failure.",
+    )
+    pack.add_argument("--zip", action="store_true", help="Create a zip archive. Disabled by default to avoid duplicating images.")
     pack.set_defaults(func=build_pack)
 
     summary = sub.add_parser("summarize")

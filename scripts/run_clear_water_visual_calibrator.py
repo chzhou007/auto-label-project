@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import shutil
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -225,17 +226,60 @@ def choose_threshold(
     }
 
 
-def copy_pack(selected_rows: list[dict[str, Any]], out_dir: Path) -> Path:
+def materialize_file(source: Path, dest: Path, *, mode: str, copy_fallback: bool) -> tuple[str, str]:
+    if mode == "manifest-only":
+        return "", "manifest-only"
+    if dest.exists():
+        dest.unlink()
+    try:
+        if mode == "hardlink":
+            os.link(source, dest)
+        elif mode == "symlink":
+            os.symlink(source, dest)
+        elif mode == "copy":
+            shutil.copy2(source, dest)
+        else:
+            raise ValueError(f"unknown file mode: {mode}")
+        return str(dest), mode
+    except OSError:
+        if copy_fallback and mode != "copy":
+            shutil.copy2(source, dest)
+            return str(dest), "copy_fallback"
+        return "", f"{mode}_failed_manifest_only"
+
+
+def build_pack(
+    selected_rows: list[dict[str, Any]],
+    out_dir: Path,
+    *,
+    file_mode: str,
+    copy_fallback: bool,
+) -> Path:
     pack_dir = out_dir / f"visual_calibrated_selected_pack_{len(selected_rows)}"
     if pack_dir.exists():
         shutil.rmtree(pack_dir)
     pack_dir.mkdir(parents=True, exist_ok=True)
+    manifest_rows: list[dict[str, Any]] = []
     for row in selected_rows:
         source = Path(str(row["file"]))
         target = pack_dir / source.name
         if target.exists():
             target = pack_dir / f"{source.stem}_{abs(hash(str(source.parent))) % 100000}{source.suffix}"
-        shutil.copy2(source, target)
+        pack_file, pack_file_mode = materialize_file(
+            source,
+            target,
+            mode=file_mode,
+            copy_fallback=copy_fallback,
+        )
+        manifest_rows.append(
+            {
+                **row,
+                "source_file": str(source),
+                "pack_file": pack_file,
+                "pack_file_mode": pack_file_mode,
+            }
+        )
+    write_csv(pack_dir / "manifest.csv", manifest_rows)
     return pack_dir
 
 
@@ -343,7 +387,16 @@ def run(args: argparse.Namespace) -> int:
     write_csv(csv_path, output_rows)
     write_csv(selected_csv, selected_rows)
     write_csv(rejected_csv, [row for row in output_rows if not parse_bool(row.get("visual_calibrated_selected"))])
-    pack_dir = copy_pack(selected_rows, out_dir) if args.build_pack else None
+    pack_dir = (
+        build_pack(
+            selected_rows,
+            out_dir,
+            file_mode=args.pack_file_mode,
+            copy_fallback=args.copy_fallback,
+        )
+        if args.build_pack
+        else None
+    )
     write_summary(summary_path, output_rows, cv, threshold, stats)
     metadata_path.write_text(
         json.dumps(
@@ -391,6 +444,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--require-vlm-accept", action="store_true", default=True)
     parser.add_argument("--no-require-vlm-accept", dest="require_vlm_accept", action="store_false")
     parser.add_argument("--build-pack", action="store_true")
+    parser.add_argument(
+        "--pack-file-mode",
+        choices=["hardlink", "symlink", "copy", "manifest-only"],
+        default="hardlink",
+        help="How to expose selected images in the pack. hardlink avoids duplicate disk usage on the same drive.",
+    )
+    parser.add_argument(
+        "--copy-fallback",
+        action="store_true",
+        help="Copy source images only if hardlink/symlink creation fails. Default keeps manifest only on failure.",
+    )
     return parser
 
 
