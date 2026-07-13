@@ -18,6 +18,24 @@ def _non_empty(value: Any) -> Any:
     return None if value in ("", None) else value
 
 
+def _normalize_name_list(value: Any) -> list[str]:
+    if value in ("", None, False):
+        return []
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized or normalized.lower() in {"false", "none", "null"}:
+            return []
+        return [item.strip() for item in normalized.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        names: list[str] = []
+        for item in value:
+            for name in _normalize_name_list(item):
+                if name not in names:
+                    names.append(name)
+        return names
+    return [str(value)]
+
+
 def get_credentials(config: dict[str, Any], credential_ref: str | None) -> dict[str, Any]:
     if not credential_ref:
         return {}
@@ -46,7 +64,28 @@ def get_model_profile(
     return active_key, profile
 
 
-def resolve_generation_runtime(config: dict[str, Any]) -> dict[str, Any]:
+def resolve_localizer_config(config: dict[str, Any], anomaly_type: str | None = None) -> dict[str, Any]:
+    generation_cfg = config.get("generation", {})
+    module_generation_cfg = config.get("modules", {}).get("generation", {})
+
+    localizer_cfg: dict[str, Any] = {}
+    if isinstance(module_generation_cfg.get("localizer"), dict):
+        localizer_cfg = deep_merge(localizer_cfg, module_generation_cfg["localizer"])
+    if isinstance(generation_cfg.get("localizer"), dict):
+        localizer_cfg = deep_merge(localizer_cfg, generation_cfg["localizer"])
+
+    policy_cfg: dict[str, Any] = {}
+    if isinstance(module_generation_cfg.get("localizer_policy"), dict):
+        policy_cfg = deep_merge(policy_cfg, module_generation_cfg["localizer_policy"])
+    if isinstance(generation_cfg.get("localizer_policy"), dict):
+        policy_cfg = deep_merge(policy_cfg, generation_cfg["localizer_policy"])
+
+    if anomaly_type and isinstance(policy_cfg.get(anomaly_type), dict):
+        localizer_cfg = deep_merge(localizer_cfg, policy_cfg[anomaly_type])
+    return localizer_cfg
+
+
+def resolve_generation_runtime(config: dict[str, Any], anomaly_type: str | None = None) -> dict[str, Any]:
     generation_cfg = config.get("generation", {})
     _, vlm_profile = get_model_profile(
         config,
@@ -76,13 +115,70 @@ def resolve_generation_runtime(config: dict[str, Any]) -> dict[str, Any]:
         if endpoint and endpoint_env:
             env[endpoint_env] = endpoint
 
+    localizer_cfg = resolve_localizer_config(config, anomaly_type=anomaly_type)
+
     return {
         "vlm_model_name": vlm_profile.get("model_name"),
         "image_model_name": image_profile.get("model_name"),
         "vlm_profile": vlm_profile,
         "image_profile": image_profile,
         "env": env,
+        "localizer_config": localizer_cfg,
+        "extra_cli_args": build_generation_extra_cli_args(localizer_cfg),
     }
+
+
+def build_generation_extra_cli_args(localizer_cfg: dict[str, Any]) -> list[str]:
+    if not localizer_cfg:
+        return []
+
+    args: list[str] = []
+
+    primary = _non_empty(localizer_cfg.get("primary")) or _non_empty(localizer_cfg.get("name"))
+    if primary:
+        args.extend(["--localizer", str(primary)])
+
+    fallback = _non_empty(localizer_cfg.get("fallback"))
+    if fallback:
+        args.extend(["--localizer-fallback", str(fallback)])
+
+    if bool(localizer_cfg.get("debug")):
+        args.append("--localizer-debug")
+
+    sidecar_eval = _normalize_name_list(localizer_cfg.get("sidecar_eval"))
+    if sidecar_eval:
+        args.extend(["--localizer-sidecar-eval", ",".join(sidecar_eval)])
+
+    pgcd_cfg = localizer_cfg.get("pgcd", {}) if isinstance(localizer_cfg.get("pgcd"), dict) else {}
+    if _non_empty(pgcd_cfg.get("threshold")):
+        args.extend(["--pgcd-threshold", str(pgcd_cfg["threshold"])])
+    if _non_empty(pgcd_cfg.get("min_component_area")) is not None:
+        args.extend(["--pgcd-min-component-area", str(pgcd_cfg["min_component_area"])])
+    if _non_empty(pgcd_cfg.get("max_global_change_ratio")) is not None:
+        args.extend(["--pgcd-max-global-change-ratio", str(pgcd_cfg["max_global_change_ratio"])])
+
+    prior_weights = (
+        pgcd_cfg.get("prompt_prior_weights", {})
+        if isinstance(pgcd_cfg.get("prompt_prior_weights"), dict)
+        else {}
+    )
+    if _non_empty(prior_weights.get("area")) is not None:
+        args.extend(["--pgcd-prompt-prior-weight-area", str(prior_weights["area"])])
+    if _non_empty(prior_weights.get("lpips")) is not None:
+        args.extend(["--pgcd-prompt-prior-weight-lpips", str(prior_weights["lpips"])])
+    if _non_empty(prior_weights.get("iou")) is not None:
+        args.extend(["--pgcd-prompt-prior-weight-iou", str(prior_weights["iou"])])
+    if _non_empty(prior_weights.get("distance")) is not None:
+        args.extend(["--pgcd-prompt-prior-weight-distance", str(prior_weights["distance"])])
+
+    sam2_cfg = localizer_cfg.get("sam2", {}) if isinstance(localizer_cfg.get("sam2"), dict) else {}
+    sam2_enabled = bool(sam2_cfg.get("enabled")) or primary == "pgcd_lpips_sam2"
+    if sam2_enabled:
+        args.append("--sam2-enabled")
+    if _non_empty(sam2_cfg.get("model")):
+        args.extend(["--sam2-model", str(sam2_cfg["model"])])
+
+    return args
 
 
 def resolve_classification_runtime(config: dict[str, Any]) -> dict[str, Any]:

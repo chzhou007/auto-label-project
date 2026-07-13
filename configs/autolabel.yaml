@@ -48,10 +48,60 @@ paths:
 # 当前 backend 仍可兼容已有 I2I 项目和 classification.py；后续可以把实现迁入本仓库后替换 backend。
 modules:
   generation:
-    backend: i2i_external
+    backend: vlm_wan_autolabel
+    localizer:
+      primary: pgcd_lpips
+      fallback: rgb_diff
+      benchmark: true
+      debug: false
+      allow_quality_fallback: true
+      sidecar_eval: null
+      quality:
+        profiles:
+          default:
+            background_preservation_min: 0.60
+            anomaly_visibility_min: 0.02
+            prompt_iou_min: 0.01
+          water_leak:
+            background_preservation_min: 0.65
+            anomaly_visibility_min: 0.02
+            prompt_iou_min: 0.02
+      pgcd:
+        threshold: otsu
+        min_component_area: 300
+        max_global_change_ratio: 0.25
+        lpips_backbone: alex
+        lpips_input_max_side: 768
+        heatmap_normalization: percentile
+        heatmap_percentile_low: 1
+        heatmap_percentile_high: 99
+        prompt_prior_weights:
+          area: 0.30
+          lpips: 0.40
+          iou: 0.20
+          distance: 0.10
+      sam2:
+        enabled: false
+        model: tiny
+    localizer_policy:
+      water_leak:
+        primary: pgcd_lpips
+        fallback: rgb_diff
+      coolant_leak:
+        primary: pgcd_lpips
+        fallback: rgb_diff
+      diesel_leak:
+        primary: rgb_diff
+        fallback: pgcd_lpips
+      oil_leak:
+        primary: rgb_diff
+        fallback: pgcd_lpips
     backends:
       i2i_external:
         project_dir: C:\Users\chang\Documents\数据标注\I2I
+        entrypoint: src/main.py
+      vlm_wan_autolabel:
+        project_dir: C:\Users\chang\Documents\鏁版嵁鏍囨敞\I2I
         entrypoint: src/main.py
 
   classification:

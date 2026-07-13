@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .i2i_external import ExternalI2IGenerationModule
+from .internal_vlm_wan import InternalVLMWanGenerationModule
 
 
 def build_generation_module(config: dict[str, Any]) -> ExternalI2IGenerationModule:
@@ -11,4 +12,6 @@ def build_generation_module(config: dict[str, Any]) -> ExternalI2IGenerationModu
     backend_cfg = module_cfg.get("backends", {}).get(backend, {})
     if backend == "i2i_external":
         return ExternalI2IGenerationModule(config, backend_cfg)
+    if backend == "vlm_wan_autolabel":
+        return InternalVLMWanGenerationModule(config, backend_cfg)
     raise ValueError(f"Unsupported generation backend: {backend}")

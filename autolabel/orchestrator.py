@@ -55,7 +55,12 @@ def run_generation_branch(
         return 0
     if ingest_metadata:
         metadata_dir = paths.get("metadata_dir", "data/processed/metadata")
-        written = ingest_generated_metadata(output_root, metadata_dir)
+        written = ingest_generated_metadata(
+            output_root,
+            metadata_dir,
+            pipeline_config=config,
+            tasks_csv=tasks_csv or default_manifest(config),
+        )
         print(f"Ingested {len(written)} generated AutoLabelSample files into {metadata_dir}")
     return 0
 

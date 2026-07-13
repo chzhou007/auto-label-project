@@ -51,7 +51,12 @@ def main() -> int:
         return result.returncode
 
     if args.ingest_metadata_dir:
-        written = ingest_generated_metadata(output_root, args.ingest_metadata_dir)
+        written = ingest_generated_metadata(
+            output_root,
+            args.ingest_metadata_dir,
+            pipeline_config=config,
+            tasks_csv=tasks,
+        )
         print(f"Ingested {len(written)} generated metadata files into {args.ingest_metadata_dir}")
     return 0
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from copy import deepcopy
@@ -29,7 +30,7 @@ from autolabel.modules.classification.dry_run import DryRunClassificationModule
 from autolabel.preprocess import estimate_extracted_frame_count
 from autolabel.exporters.labelstudio import build_labelstudio_config, sample_to_labelstudio_task
 from autolabel.sample_factory import make_object
-from autolabel.utils import read_json, write_csv, write_json
+from autolabel.utils import read_csv, read_json, write_csv, write_json
 from autolabel.validators import ValidationError, validate_sample_contract
 
 
@@ -223,6 +224,318 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(review_config["drop_failed"])
         self.assertFalse(review_config["drop_incomplete_person"])
 
+    def test_generation_runtime_includes_localizer_cli_passthrough(self) -> None:
+        config = load_config(ROOT / "configs" / "autolabel.yaml")
+        generation = resolve_generation_runtime(config)
+        extra_cli_args = generation["extra_cli_args"]
+
+        self.assertIn("--localizer", extra_cli_args)
+        self.assertIn("pgcd_lpips", extra_cli_args)
+        self.assertIn("--localizer-fallback", extra_cli_args)
+        self.assertIn("rgb_diff", extra_cli_args)
+        self.assertIn("--pgcd-threshold", extra_cli_args)
+        self.assertIn("--pgcd-min-component-area", extra_cli_args)
+        self.assertIn("--pgcd-max-global-change-ratio", extra_cli_args)
+        self.assertIn("--sam2-model", extra_cli_args)
+
+    def test_config_includes_localizer_policy_examples(self) -> None:
+        config = load_config(ROOT / "configs" / "autolabel.yaml")
+        generation_module = config["modules"]["generation"]
+
+        self.assertEqual(generation_module["backend"], "vlm_wan_autolabel")
+        self.assertEqual(generation_module["localizer_policy"]["water_leak"]["primary"], "pgcd_lpips")
+        self.assertEqual(generation_module["localizer_policy"]["coolant_leak"]["primary"], "pgcd_lpips")
+        self.assertEqual(generation_module["localizer_policy"]["diesel_leak"]["primary"], "rgb_diff")
+        self.assertEqual(generation_module["localizer_policy"]["oil_leak"]["fallback"], "pgcd_lpips")
+
+    def test_i2i_generator_appends_extra_cli_args(self) -> None:
+        from autolabel.adapters.i2i_generator import I2IGenerator
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp)
+            entrypoint = project_dir / "src" / "main.py"
+            entrypoint.parent.mkdir(parents=True, exist_ok=True)
+            entrypoint.write_text("print('ok')\n", encoding="utf-8")
+
+            recorded = {}
+
+            def fake_run(cmd, **kwargs):
+                recorded["cmd"] = cmd
+                recorded["kwargs"] = kwargs
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with patch("autolabel.adapters.i2i_generator.subprocess.run", side_effect=fake_run):
+                I2IGenerator(project_dir).run(
+                    tasks_csv=project_dir / "tasks.csv",
+                    image_root=project_dir / "images",
+                    output_root=project_dir / "output",
+                    extra_cli_args=["--localizer", "pgcd_lpips", "--localizer-debug"],
+                )
+
+            self.assertIn("--localizer", recorded["cmd"])
+            self.assertIn("pgcd_lpips", recorded["cmd"])
+            self.assertIn("--localizer-debug", recorded["cmd"])
+
+    def test_generation_runtime_uses_anomaly_type_localizer_policy(self) -> None:
+        config = load_config(ROOT / "configs" / "autolabel.yaml")
+        config["modules"]["generation"]["localizer_policy"] = {
+            "oil_leak": {
+                "primary": "rgb_diff",
+                "fallback": "none",
+            }
+        }
+
+        runtime = resolve_generation_runtime(config, anomaly_type="oil_leak")
+        self.assertIn("--localizer", runtime["extra_cli_args"])
+        localizer_index = runtime["extra_cli_args"].index("--localizer")
+        self.assertEqual(runtime["extra_cli_args"][localizer_index + 1], "rgb_diff")
+        self.assertIn("--localizer-fallback", runtime["extra_cli_args"])
+        fallback_index = runtime["extra_cli_args"].index("--localizer-fallback")
+        self.assertEqual(runtime["extra_cli_args"][fallback_index + 1], "none")
+
+    def test_generation_module_groups_rows_by_localizer_policy(self) -> None:
+        from autolabel.modules.generation.i2i_external import ExternalI2IGenerationModule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_water",
+                        "image_id": "image_water",
+                        "image_uri": str(root / "water.jpg"),
+                        "anomaly_type": "water_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    },
+                    {
+                        "sample_id": "sample_oil",
+                        "image_id": "image_oil",
+                        "image_uri": str(root / "oil.jpg"),
+                        "anomaly_type": "oil_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    },
+                ],
+                ["sample_id", "image_id", "image_uri", "anomaly_type", "source_type", "task_mode"],
+            )
+            config = load_config(ROOT / "configs" / "autolabel.yaml")
+            config["modules"]["generation"]["localizer_policy"] = {
+                "oil_leak": {
+                    "primary": "rgb_diff",
+                    "fallback": "none",
+                }
+            }
+
+            calls = []
+
+            class FakeCompleted:
+                returncode = 0
+                stdout = "ok\n"
+                stderr = ""
+
+            def fake_run(self, **kwargs):
+                calls.append(kwargs)
+                return FakeCompleted()
+
+            with patch("autolabel.modules.generation.i2i_external.I2IGenerator.run", new=fake_run):
+                result = ExternalI2IGenerationModule(config, {}).run(
+                    tasks_csv=manifest_path,
+                    image_root=root,
+                    output_root=root / "out",
+                )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(len(calls), 2)
+            first_args = calls[0]["extra_cli_args"]
+            second_args = calls[1]["extra_cli_args"]
+            self.assertNotEqual(first_args, second_args)
+            self.assertTrue(any(arg == "rgb_diff" for arg in first_args + second_args))
+
+    def test_generation_registry_supports_vlm_wan_autolabel_backend(self) -> None:
+        from autolabel.modules.generation import build_generation_module
+        from autolabel.modules.generation.internal_vlm_wan import InternalVLMWanGenerationModule
+
+        config = load_config(ROOT / "configs" / "autolabel.yaml")
+        config["modules"]["generation"]["backend"] = "vlm_wan_autolabel"
+        config["modules"]["generation"]["backends"]["vlm_wan_autolabel"] = {}
+        module = build_generation_module(config)
+        self.assertIsInstance(module, InternalVLMWanGenerationModule)
+
+    def test_ingest_generated_metadata_applies_localizer_and_writes_benchmark(self) -> None:
+        from PIL import Image, ImageDraw, ImageFilter
+
+        from autolabel.pipeline import ingest_generated_metadata
+
+        def make_base_image(size=(256, 192)):
+            image = Image.new("RGB", size, (132, 132, 132))
+            draw = ImageDraw.Draw(image)
+            for y in range(0, size[1], 16):
+                color = 126 if (y // 16) % 2 == 0 else 138
+                draw.line([(0, y), (size[0], y)], fill=(color, color, color), width=1)
+            return image
+
+        def add_water_patch(img, bbox):
+            out = img.convert("RGBA")
+            overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            draw.ellipse(bbox, fill=(190, 205, 210, 120))
+            overlay = overlay.filter(ImageFilter.GaussianBlur(radius=2))
+            return Image.alpha_composite(out, overlay).convert("RGB")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            i2i_output_root = root / "i2i_outputs"
+            metadata_input_dir = i2i_output_root / "metadata"
+            metadata_input_dir.mkdir(parents=True)
+            processed_root = root / "processed"
+            metadata_dir = processed_root / "metadata"
+            original_path = root / "original.jpg"
+            generated_path = root / "generated.jpg"
+            base = make_base_image()
+            generated = add_water_patch(base, (98, 96, 152, 132))
+            base.save(original_path)
+            generated.save(generated_path)
+
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_generated_localizer",
+                        "image_id": "image_generated_localizer",
+                        "image_uri": str(original_path),
+                        "anomaly_type": "water_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "anomaly_type", "source_type", "task_mode"],
+            )
+
+            sample = normalize_autolabel_sample(
+                {
+                    "sample_id": "sample_generated_localizer",
+                    "image_asset": {
+                        "image_id": "image_generated_localizer",
+                        "image_uri": str(generated_path),
+                        "width": 256,
+                        "height": 192,
+                        "source_type": "generated",
+                    },
+                    "objects": [
+                        {
+                            "object_id": "leak_000001",
+                            "object_type": "leakage_area",
+                            "box": {"format": "xyxy", "x1": 80, "y1": 80, "x2": 170, "y2": 150},
+                            "geometry_source": "synthetic_generator",
+                            "geometry_model": {"model_name": "wan", "model_version": "test", "confidence": 0.9},
+                            "geometry_detail": {
+                                "polygon": None,
+                                "mask_uri": None,
+                                "mask_format": None,
+                                "generation_params": {
+                                    "prompt_box": [80, 80, 170, 150],
+                                    "output_contract": "AutoLabelSample.objects[]",
+                                },
+                            },
+                            "crop": {
+                                "crop_id": "leak_000001_crop",
+                                "crop_uri": "pending",
+                                "crop_box": None,
+                                "crop_expand_ratio": None,
+                                "is_valid_crop": False,
+                            },
+                            "classification": {
+                                "multi_labels": [
+                                    {
+                                        "label_key": "anomaly_type",
+                                        "label_value": "water_leak",
+                                        "confidence": None,
+                                        "evidence": "generated label",
+                                    }
+                                ],
+                                "classifier_type": "vlm",
+                                "classifier_name": "i2i_generation",
+                                "classifier_version": "test",
+                                "prompt_version": "test",
+                                "raw_response": None,
+                            },
+                            "quality_check": None,
+                        }
+                    ],
+                    "workflow": {"workflow_status": "classified"},
+                    "export": {"export_format": "labelstudio", "export_status": "not_exported"},
+                },
+                pipeline_id="autolabel_dag_v1",
+                pipeline_version="0.1.0",
+            )
+            write_json(metadata_input_dir / "sample_generated_localizer.json", sample)
+
+            config = load_config(ROOT / "configs" / "autolabel.yaml")
+            config["modules"]["generation"]["localizer"]["primary"] = "rgb_diff"
+            config["modules"]["generation"]["localizer"]["fallback"] = "pgcd_lpips"
+            config["modules"]["generation"]["localizer"]["debug"] = True
+            config["modules"]["generation"]["localizer"]["sidecar_eval"] = "pgcd_lpips"
+            config["modules"]["generation"]["localizer_policy"]["water_leak"] = {
+                "primary": "rgb_diff",
+                "fallback": "pgcd_lpips",
+            }
+            config["generation"]["crop_expand_ratio"] = 0.05
+            config["modules"]["generation"]["localizer"]["pgcd"]["min_component_area"] = 50
+
+            written = ingest_generated_metadata(
+                i2i_output_root,
+                metadata_dir,
+                pipeline_config=config,
+                tasks_csv=manifest_path,
+            )
+
+            self.assertEqual(written, [metadata_dir / "sample_generated_localizer.json"])
+            ingested = read_json(written[0])
+            obj = ingested["objects"][0]
+            generation_params = obj["geometry_detail"]["generation_params"]
+            localizer_info = obj["geometry_detail"]["generation_params"]["localizer"]
+            self.assertEqual(generation_params["localizer_strategy"], "rgb_diff")
+            self.assertEqual(generation_params["localizer_fallback"], "pgcd_lpips")
+            self.assertTrue(generation_params["localizer_debug"])
+            self.assertEqual(localizer_info["strategy"], "rgb_diff")
+            self.assertEqual(localizer_info["fallback"], "pgcd_lpips")
+            self.assertEqual(localizer_info["used"], "rgb_diff")
+            self.assertIn("metrics", localizer_info)
+            self.assertIn("benchmark", localizer_info)
+            self.assertIn("quality", localizer_info)
+            processed_root = metadata_dir.parent
+            self.assertFalse(Path(obj["geometry_detail"]["mask_uri"]).is_absolute())
+            self.assertTrue((processed_root / obj["geometry_detail"]["mask_uri"]).exists())
+            self.assertEqual(obj["geometry_detail"]["mask_format"], "png")
+            self.assertFalse(Path(obj["crop"]["crop_uri"]).is_absolute())
+            self.assertTrue((processed_root / obj["crop"]["crop_uri"]).exists())
+            self.assertIn("sidecar", localizer_info)
+            self.assertIn("quality", generation_params)
+            self.assertIn("attempts", localizer_info)
+            self.assertFalse(Path(localizer_info["sidecar"]["debug_artifacts"]["heatmap"]).is_absolute())
+            self.assertTrue((processed_root / localizer_info["sidecar"]["debug_artifacts"]["heatmap"]).exists())
+            self.assertFalse(Path(localizer_info["sidecar"]["metrics"]["pgcd_heatmap_path"]).is_absolute())
+            self.assertTrue((processed_root / localizer_info["sidecar"]["metrics"]["pgcd_heatmap_path"]).exists())
+            log_dir = metadata_dir / "logs"
+            self.assertTrue(any(log_dir.glob("localizer_benchmark_*.json")))
+            self.assertTrue(any(log_dir.glob("localizer_benchmark_*.csv")))
+            self.assertTrue(any(log_dir.glob("localizer_benchmark_*_summary.json")))
+            self.assertTrue(any(log_dir.glob("localizer_failure_summary_*.json")))
+            self.assertTrue(any(log_dir.glob("audit_sample_list_*.csv")))
+            summary_json = read_json(next(log_dir.glob("localizer_benchmark_*_summary.json")))
+            self.assertIn("manual_accept_rate", summary_json["rgb_diff"])
+            audit_csv = next(log_dir.glob("audit_sample_list_*.csv"))
+            audit_rows = read_csv(audit_csv)
+            self.assertTrue(audit_rows)
+            self.assertIn("task_id", audit_rows[0])
+            self.assertIn("generated_image_uri", audit_rows[0])
+            self.assertIn("localizer_used", audit_rows[0])
+            self.assertIn("manual_accept", audit_rows[0])
+
     def test_crop_review_config_uses_detector_model_profile(self) -> None:
         config = deepcopy(load_config(ROOT / "configs" / "autolabel.yaml"))
         config["direct_annotation"]["crop_review"]["enabled"] = True
@@ -234,6 +547,62 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(review["dry_run"])
         self.assertEqual(review["model_name"], "aios-smart-eye-vlm")
         self.assertEqual(review["model_ref"], "ppe_person_vlm_labelstudio_detector")
+
+    def test_ingest_generated_metadata_can_disable_benchmark_outputs(self) -> None:
+        from autolabel.pipeline import ingest_generated_metadata
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata_dir = root / "processed" / "metadata"
+            sample = normalize_autolabel_sample(
+                {
+                    "sample_id": "sample_no_benchmark",
+                    "image_asset": {
+                        "image_id": "image_no_benchmark",
+                        "image_uri": "metadata/images/generated.jpg",
+                        "width": 100,
+                        "height": 80,
+                        "source_type": "generated",
+                    },
+                    "objects": [],
+                    "workflow": {"workflow_status": "classified"},
+                    "export": {"export_format": "labelstudio", "export_status": "not_exported"},
+                }
+            )
+            rows = [
+                {
+                    "sample_id": "sample_no_benchmark",
+                    "object_id": "obj_001",
+                    "localizer": "rgb_diff",
+                    "success": True,
+                }
+            ]
+
+            config = {
+                "modules": {
+                    "generation": {
+                        "localizer": {
+                            "benchmark": False,
+                        }
+                    }
+                }
+            }
+
+            with (
+                patch("autolabel.pipeline.load_generated_samples", return_value=[sample]),
+                patch("autolabel.pipeline.apply_localizer_postprocess", return_value=(sample, rows)),
+                patch("autolabel.pipeline.write_localizer_benchmark_reports") as write_benchmark,
+                patch("autolabel.pipeline.write_audit_sample_csv") as write_audit,
+            ):
+                written = ingest_generated_metadata(
+                    i2i_output_root=root / "i2i_outputs",
+                    metadata_dir=metadata_dir,
+                    pipeline_config=config,
+                )
+
+            self.assertEqual(written, [metadata_dir / "sample_no_benchmark.json"])
+            self.assertFalse(write_benchmark.called)
+            self.assertFalse(write_audit.called)
 
     def test_crop_review_failure_updates_object_quality_check(self) -> None:
         obj = {"object_id": "person_000001", "object_type": "person", "quality_check": None}

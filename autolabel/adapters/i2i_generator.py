@@ -33,6 +33,7 @@ class I2IGenerator:
         skip_existing: bool = False,
         limit: int | None = None,
         env: dict[str, str] | None = None,
+        extra_cli_args: list[str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         if not self.main_py.exists():
             raise FileNotFoundError(f"I2I entrypoint not found: {self.main_py}")
@@ -65,6 +66,8 @@ class I2IGenerator:
             cmd.append("--skip-existing")
         if limit is not None:
             cmd.extend(["--limit", str(limit)])
+        if extra_cli_args:
+            cmd.extend([str(arg) for arg in extra_cli_args if str(arg)])
 
         subprocess_env = os.environ.copy()
         if env:

@@ -900,10 +900,18 @@ python scripts/export_labelstudio.py --config configs/autolabel.yaml --update-sa
 运行基础测试：
 
 ```powershell
-python -m unittest discover -s tests
+python -m pytest tests -q
 ```
 
 运行 Python 编译检查：
+
+```powershell
+python -m pytest tests/generation -q
+```
+
+```text
+2026-07-01 baseline: 78 passed
+```
 
 ```powershell
 python -m compileall autolabel scripts tests
@@ -952,5 +960,312 @@ anomaly_type
 ```
 
 ### 5. 生成图为什么没有再分类
+
+## 17. I2I / PGCD Localizer
+
+### 17.0 Current Version Quick Start
+
+This section is the authoritative usage guide for the current `I2I + localizer` implementation.
+
+Current behavior:
+
+1. The external I2I project generates edited images.
+2. This repository ingests generated metadata and runs localizer postprocess during ingest.
+3. The ingest step writes `final_bbox`, `mask`, `crop`, benchmark logs, and audit logs.
+
+Supported localizers:
+
+- `rgb_diff`
+- `pgcd_lpips`
+- `pgcd_lpips_sam2`
+
+Recommended entrypoints:
+
+- `python scripts/run_pipeline.py --config configs/autolabel.yaml --branches generation`
+- `python scripts/run_i2i_generation.py --pipeline-config configs/autolabel.yaml --ingest-metadata-dir data/processed/metadata`
+- `python -m autolabel.modules.generation.main ...` for temporary CLI overrides such as `--localizer`, `--benchmark`, and `--sam2-enabled`
+
+### 17.1 Preconditions
+
+Before running this version, make sure:
+
+1. `configs/autolabel.yaml` points `paths.i2i_project` and `modules.generation.backends.vlm_wan_autolabel.project_dir` to the external I2I repo.
+2. Your manifest rows for generation include `task_mode=generation` and `anomaly_type`.
+3. The required model credentials are set in environment variables or config.
+4. Dependencies are installed:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+### 17.2 Recommended Production Command
+
+Run the generation branch through the unified DAG entrypoint:
+
+```powershell
+python scripts/run_pipeline.py `
+  --config configs/autolabel.yaml `
+  --branches generation
+```
+
+This command:
+
+- calls the external I2I backend
+- ingests generated metadata into `data/processed/metadata`
+- runs localizer postprocess during ingest
+- writes benchmark and audit outputs when `modules.generation.localizer.benchmark: true`
+
+### 17.3 Generation-Only Script
+
+If you want to run only the generation branch script:
+
+```powershell
+python scripts/run_i2i_generation.py `
+  --pipeline-config configs/autolabel.yaml `
+  --ingest-metadata-dir data/processed/metadata
+```
+
+Use this when you want to override only `--tasks`, `--image-root`, or `--output-root`.
+This script is config-driven and does not expose localizer override flags on the command line.
+
+### 17.4 Localizer Debug / Override CLI
+
+For temporary localizer overrides, benchmark runs, and SAM2 experiments, use:
+
+```powershell
+python -m autolabel.modules.generation.main `
+  --config configs/autolabel.yaml `
+  --tasks data/staging/image_sequence/manifest.csv `
+  --image-root data/staging/image_sequence `
+  --output-root data/processed/i2i_outputs `
+  --localizer pgcd_lpips `
+  --localizer-fallback rgb_diff `
+  --benchmark
+```
+
+Common flags:
+
+- `--localizer rgb_diff|pgcd_lpips|pgcd_lpips_sam2`
+- `--localizer-fallback rgb_diff|none`
+- `--localizer-debug`
+- `--localizer-sidecar-eval pgcd_lpips,pgcd_lpips_sam2`
+- `--benchmark`
+- `--sam2-enabled --sam2-model tiny|small|base`
+- `--no-ingest-generated`
+
+### 17.5 Common Run Modes
+
+Stable production mode:
+
+```powershell
+python scripts/run_pipeline.py --config configs/autolabel.yaml --branches generation
+```
+
+`rgb_diff` main output with PGCD and SAM2 sidecar evaluation:
+
+```powershell
+python -m autolabel.modules.generation.main `
+  --config configs/autolabel.yaml `
+  --localizer rgb_diff `
+  --localizer-sidecar-eval pgcd_lpips,pgcd_lpips_sam2 `
+  --benchmark
+```
+
+Gray rollout for PGCD with RGB diff fallback:
+
+```powershell
+python -m autolabel.modules.generation.main `
+  --config configs/autolabel.yaml `
+  --localizer pgcd_lpips `
+  --localizer-fallback rgb_diff `
+  --benchmark
+```
+
+SAM2 experiment:
+
+```powershell
+python -m autolabel.modules.generation.main `
+  --config configs/autolabel.yaml `
+  --localizer pgcd_lpips_sam2 `
+  --sam2-enabled `
+  --sam2-model tiny `
+  --benchmark
+```
+
+### 17.6 Recommended Config
+
+The current recommended config block is:
+
+```yaml
+modules:
+  generation:
+    backend: vlm_wan_autolabel
+    localizer:
+      primary: pgcd_lpips
+      fallback: rgb_diff
+      benchmark: true
+      debug: false
+      allow_quality_fallback: true
+      sidecar_eval: null
+      pgcd:
+        threshold: otsu
+        min_component_area: 300
+        max_global_change_ratio: 0.25
+        prompt_prior_weights:
+          area: 0.30
+          lpips: 0.40
+          iou: 0.20
+          distance: 0.10
+      sam2:
+        enabled: false
+        model: tiny
+    localizer_policy:
+      water_leak:
+        primary: pgcd_lpips
+        fallback: rgb_diff
+      coolant_leak:
+        primary: pgcd_lpips
+        fallback: rgb_diff
+      diesel_leak:
+        primary: rgb_diff
+        fallback: pgcd_lpips
+      oil_leak:
+        primary: rgb_diff
+        fallback: pgcd_lpips
+```
+
+### 17.7 Outputs
+
+Main output locations:
+
+```text
+data/processed/i2i_outputs/
+data/processed/metadata/
+data/processed/masks/
+data/processed/crops/
+data/processed/metadata/api_responses/
+data/processed/metadata/debug/
+data/processed/metadata/logs/
+```
+
+Typical benchmark and audit files:
+
+```text
+localizer_benchmark_*.json
+localizer_benchmark_*.csv
+localizer_benchmark_*_summary.json
+localizer_failure_summary_*.json
+audit_sample_list_*.csv
+```
+
+### 17.8 Metadata Notes
+
+`objects[].geometry_detail.generation_params.localizer` now records:
+
+- `strategy`
+- `primary`
+- `fallback`
+- `used`
+- `fallback_used`
+- `fallback_trigger`
+- `reason`
+- `metrics`
+- `benchmark`
+- `quality`
+- `attempts`
+- `debug_artifacts`
+- `sidecars`
+
+Artifact paths such as `mask_uri`, `crop_uri`, `wan_response_path`, and `pgcd_heatmap_path` are written as relative paths when possible.
+
+### 17.9 Operational Notes
+
+- `run_pipeline.py` and `run_i2i_generation.py` are YAML-driven; use the module CLI only when you need temporary localizer overrides.
+- `manual_accept_rate` becomes meaningful only after manual review data is filled back into the audit workflow.
+- If `modules.generation.localizer.benchmark: false`, ingest will skip benchmark and audit output generation.
+- If SAM2 is unavailable, `pgcd_lpips_sam2` falls back to coarse PGCD behavior instead of breaking the main flow.
+
+2026-07 supplement:
+- LPIPS roadmap dependencies are now declared in both `requirements.txt` and `pyproject.toml`: `torch`, `torchvision`, `lpips`.
+- `allow_quality_fallback` is supported during metadata ingest. If the primary localizer succeeds but fails the quality gate, the configured fallback localizer can take over.
+- `sidecar_eval` now supports one localizer, a comma-separated list such as `pgcd_lpips,pgcd_lpips_sam2`, or a YAML list.
+- Benchmark rows now carry real `bbox_iou`, `precision`, `recall`, `mask_iou`, `fallback_rate`, and `quality_pass_rate` signals instead of fixed zero values.
+- Localizer metadata now records `benchmark`, `quality`, and `attempts`, and benchmark logs additionally emit `localizer_failure_summary_*.json`.
+
+当前 generation 分支已经接入路线文档中的 localizer 架构。默认 backend 为 `vlm_wan_autolabel`，它仍复用现有 I2I 项目完成生成，但会在 metadata ingest 阶段执行仓库内的 localizer 后处理，并输出 benchmark 与 audit 产物。
+
+推荐配置示例：
+
+```yaml
+modules:
+  generation:
+    backend: vlm_wan_autolabel
+    localizer:
+      primary: pgcd_lpips
+      fallback: rgb_diff
+      debug: false
+      sidecar_eval: null
+      pgcd:
+        threshold: otsu
+        min_component_area: 300
+        max_global_change_ratio: 0.25
+        lpips_backbone: alex
+        lpips_input_max_side: 768
+        heatmap_normalization: percentile
+        heatmap_percentile_low: 1
+        heatmap_percentile_high: 99
+        prompt_prior_weights:
+          area: 0.30
+          lpips: 0.40
+          iou: 0.20
+          distance: 0.10
+      sam2:
+        enabled: false
+        model: tiny
+    localizer_policy:
+      water_leak:
+        primary: pgcd_lpips
+        fallback: rgb_diff
+      coolant_leak:
+        primary: pgcd_lpips
+        fallback: rgb_diff
+      diesel_leak:
+        primary: rgb_diff
+        fallback: pgcd_lpips
+      oil_leak:
+        primary: rgb_diff
+        fallback: pgcd_lpips
+```
+
+当前实现说明：
+
+- `rgb_diff` 仍保留为 baseline 和 fallback。
+- `pgcd_lpips` 会优先使用可选的 `lpips + torch` 计算 perceptual heatmap；如果当前环境未安装这些依赖，会自动降级为 RGB-diff heatmap，并在 metadata metrics 中记录 `pgcd_heatmap_backend`。
+- `pgcd_lpips_sam2` 是可选增强；如果没有可用的 SAM2 refiner，不会阻断主流程，而是回退到 coarse PGCD 结果。
+- `sidecar_eval` 可以让主输出继续使用一个 localizer，同时把另一个 localizer 的结果写入 benchmark，不影响最终 metadata。
+
+localizer 后处理会把以下信息写回 `objects[].geometry_detail.generation_params.localizer`：
+
+- `strategy` / `fallback` / `used`
+- `fallback_used` / `reason`
+- `metrics`
+- `debug_artifacts`
+- `sidecar`
+
+benchmark 与抽检输出目录：
+
+```text
+data/processed/metadata/logs/
+  localizer_benchmark_*.json
+  localizer_benchmark_*.csv
+  localizer_benchmark_*_summary.json
+  localizer_benchmark_*_failures.json
+  audit_sample_list_*.csv
+```
+
+补充说明：
+
+- `lpips`、`torch`、`torchvision`、`sam2` 都属于可选增强依赖，不是基础运行必需项。
+- 如果只需要稳定跑通主流程，当前默认配置已经可以在缺失这些依赖时自动回退。
 
 这是当前设计：生成图自带框坐标和原始分类信息，因此跳过 `classification.py`，避免重复调用大模型。
