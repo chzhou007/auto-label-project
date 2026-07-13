@@ -22,12 +22,12 @@ credentials:
   qwen_classifier:
     api_key_env: QWEN397B_API_KEY
     api_key: ${QWEN397B_API_KEY}
-    base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+    base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/v1}
 
   qwen_geometry_vlm:
     api_key_env: QWEN397B_API_KEY
     api_key: ${QWEN397B_API_KEY}
-    base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+    base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/v1}
 
   local_or_private_model:
     api_key_env: PRIVATE_MODEL_API_KEY
@@ -130,16 +130,20 @@ modules:
 models:
   generation:
     active_vlm: qwen_grid_selector
-    active_image_generator: wan_image_editor
+    active_image_generator: seedream5_image_editor
     vlm:
       qwen_grid_selector:
-        provider: dashscope
-        model_name: aios-smart-eye-vlm
+        provider: openai_compatible
+        model_name: ${QWEN_GRID_SELECTOR_MODEL:-qwen3.6-27b}
         model_version: null
-        credential_ref: dashscope_generation
-        api_key_env: DASHSCOPE_API_KEY
-        endpoint_env: DASHSCOPE_VLM_ENDPOINT
-        endpoint: ${DASHSCOPE_VLM_ENDPOINT}
+        credential_ref: qwen_classifier
+        api_key_env: QWEN397B_API_KEY
+        api_key_env_aliases:
+          - DASHSCOPE_API_KEY
+        endpoint_env: QWEN397B_API_URL
+        endpoint_env_aliases:
+          - DASHSCOPE_VLM_ENDPOINT
+        endpoint: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/v1}
 
       custom_grid_selector:
         provider: custom
@@ -188,14 +192,14 @@ models:
     candidates:
       qwen397b_vlm_classifier:
         provider: openai_compatible
-        model_name: ${QWEN397B_MODEL:-aios-smart-eye-vlm}
+        model_name: ${QWEN397B_MODEL:-qwen3.6-27b}
         model_version: null
         classifier_type: vlm
-        classifier_name: aios-smart-eye-vlm
+        classifier_name: qwen3.6-27b
         classifier_version: external
         prompt_version: crop_industrial_safety_v2
         credential_ref: qwen_classifier
-        base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+        base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/v1}
 
       private_vlm_classifier:
         provider: custom
@@ -215,10 +219,10 @@ models:
         service_type: vlm_detector
         backend: vlm_labelstudio_detector
         geometry_source: detector
-        model_name: ${QWEN_GEOMETRY_MODEL:-aios-smart-eye-vlm}
+        model_name: ${QWEN_GEOMETRY_MODEL:-qwen3.6-27b}
         model_version: vlm-pre-annotation-v2
         credential_ref: qwen_geometry_vlm
-        base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+        base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/v1}
         temperature: 0.0
         max_tokens: 2000
         request_image_max_side: 1280
@@ -283,7 +287,7 @@ preprocess:
 generation:
   enabled: true
   vlm_model_key: qwen_grid_selector
-  image_model_key: wan_image_editor
+  image_model_key: seedream5_image_editor
   grid_layout: 4x4
   edit_bbox_expand_ratio: 0.2
   crop_expand_ratio: 0.1

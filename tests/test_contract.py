@@ -225,10 +225,18 @@ class ContractTests(unittest.TestCase):
         detector = build_detector_runtime_config(config)
         preprocess = config["preprocess"]
         direct = config["direct_annotation"]
-        self.assertEqual(generation["vlm_model_name"], "aios-smart-eye-vlm")
+        self.assertEqual(generation["vlm_model_name"], "qwen3.6-27b")
+        self.assertEqual(generation["image_model_name"], "doubao-seedream-5.0-lite")
         self.assertIn("model", classification)
         self.assertIn("model_profiles", detector)
+        self.assertEqual(classification["model"], "qwen3.6-27b")
+        self.assertEqual(classification["api_url"], "https://deepseek.gds-services.com/v1")
         self.assertEqual(detector["services"]["ppe_person"]["model_ref"], "ppe_person_vlm_labelstudio_detector")
+        self.assertEqual(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["model_name"], "qwen3.6-27b")
+        self.assertEqual(
+            detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["base_url"],
+            "https://deepseek.gds-services.com/v1",
+        )
         self.assertEqual(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["parse_retry_count"], 0)
         self.assertTrue(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["fail_on_parse_error"])
         self.assertFalse(detector["model_profiles"]["ppe_person_vlm_labelstudio_detector"]["use_response_format"])
@@ -333,6 +341,8 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(generation_module["backend"], "vlm_wan_autolabel")
         self.assertEqual(generation_module["backends"]["vlm_wan_autolabel"]["project_dir"], "external/I2I")
         self.assertFalse(generation_module["backends"]["vlm_wan_autolabel"]["pass_localizer_cli_args"])
+        self.assertEqual(config["models"]["generation"]["active_image_generator"], "seedream5_image_editor")
+        self.assertEqual(config["generation"]["image_model_key"], "seedream5_image_editor")
         self.assertEqual(generation_module["localizer_policy"]["water_leak"]["primary"], "pgcd_lpips")
         self.assertEqual(generation_module["localizer_policy"]["coolant_leak"]["primary"], "pgcd_lpips")
         self.assertEqual(generation_module["localizer_policy"]["diesel_leak"]["primary"], "rgb_diff")
@@ -832,7 +842,7 @@ class ContractTests(unittest.TestCase):
         review = build_crop_review_config(config, detector)
         self.assertTrue(review["enabled"])
         self.assertTrue(review["dry_run"])
-        self.assertEqual(review["model_name"], "aios-smart-eye-vlm")
+        self.assertEqual(review["model_name"], "qwen3.6-27b")
         self.assertEqual(review["model_ref"], "ppe_person_vlm_labelstudio_detector")
 
     def test_ingest_generated_metadata_can_disable_benchmark_outputs(self) -> None:

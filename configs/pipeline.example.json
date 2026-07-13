@@ -50,8 +50,8 @@
     }
   },
   "generation": {
-    "vlm_model": "aios-smart-eye-vlm",
-    "image_model": "wan2.7-image-pro",
+    "vlm_model": "qwen3.6-27b",
+    "image_model": "doubao-seedream-5.0-lite",
     "grid_layout": "4x4",
     "edit_bbox_expand_ratio": 0.2,
     "crop_expand_ratio": 0.1,
