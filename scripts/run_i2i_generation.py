@@ -19,6 +19,7 @@ def main() -> int:
     parser.add_argument("--image-root", default=None)
     parser.add_argument("--output-root", default=None)
     parser.add_argument("--processed-root", default=None)
+    parser.add_argument("--generation-vlm-model-key", default=None)
     parser.add_argument("--generation-image-model-key", default=None)
     parser.add_argument("--generation-workers", type=int, default=None)
     parser.add_argument("--pipeline-config", default="configs/autolabel.yaml")
@@ -33,6 +34,7 @@ def main() -> int:
     configure_processed_root(config, args.processed_root)
     apply_generation_run_overrides(
         config,
+        vlm_model_key=args.generation_vlm_model_key,
         image_model_key=args.generation_image_model_key,
         workers=args.generation_workers,
     )
@@ -56,11 +58,16 @@ def main() -> int:
     if preflight.get("skipped"):
         print(f"Generation preflight: no generation rows found in {tasks}")
     else:
+        model_pairs = [
+            f"{anomaly}:{runtime.get('vlm_model_name')}->{runtime.get('image_model_name')}"
+            for anomaly, runtime in sorted((preflight.get("runtime_by_anomaly") or {}).items())
+        ]
         print(
             "Generation preflight: "
             f"generation_rows={preflight.get('generation_rows')}, "
             f"effective_rows={preflight.get('effective_generation_rows')}, "
-            f"anomaly_types={','.join(preflight.get('anomaly_types', []))}"
+            f"anomaly_types={','.join(preflight.get('anomaly_types', []))}, "
+            f"models={';'.join(model_pairs)}"
         )
     module = build_generation_module(config)
     result = module.run(

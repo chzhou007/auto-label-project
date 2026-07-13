@@ -20,6 +20,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-root", default=None)
     parser.add_argument("--output-root", default=None)
     parser.add_argument("--processed-root", default=None)
+    parser.add_argument("--generation-vlm-model-key", default=None)
     parser.add_argument("--generation-image-model-key", default=None)
     parser.add_argument("--generation-workers", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true")
@@ -94,6 +95,7 @@ def main() -> int:
     configure_processed_root(config, args.processed_root)
     apply_generation_run_overrides(
         config,
+        vlm_model_key=args.generation_vlm_model_key,
         image_model_key=args.generation_image_model_key,
         workers=args.generation_workers,
     )

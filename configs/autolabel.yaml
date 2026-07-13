@@ -143,7 +143,7 @@ models:
 
       custom_grid_selector:
         provider: custom
-        model_name: replace_with_vlm_model
+        model_name: ${CUSTOM_VLM_MODEL:-replace_with_vlm_model}
         model_version: null
         credential_ref: local_or_private_model
         api_key_env: PRIVATE_MODEL_API_KEY

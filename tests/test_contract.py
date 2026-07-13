@@ -286,6 +286,31 @@ class ContractTests(unittest.TestCase):
             "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations",
         )
 
+    def test_generation_run_overrides_can_switch_vlm_and_image_models(self) -> None:
+        from autolabel.orchestrator import apply_generation_run_overrides
+
+        config = load_config(ROOT / "configs" / "autolabel.yaml")
+        config["models"]["generation"]["vlm"]["private_grid_selector"] = {
+            "provider": "custom",
+            "model_name": "private-vlm-grid",
+            "credential_ref": "local_or_private_model",
+            "api_key_env": "PRIVATE_MODEL_API_KEY",
+            "endpoint_env": "CUSTOM_VLM_ENDPOINT",
+            "endpoint": "http://127.0.0.1:9000/vlm",
+        }
+
+        apply_generation_run_overrides(
+            config,
+            vlm_model_key="private_grid_selector",
+            image_model_key="seedream5_image_editor",
+            workers=3,
+        )
+        runtime = resolve_generation_runtime(config, anomaly_type="water_leak")
+
+        self.assertEqual(runtime["vlm_model_name"], "private-vlm-grid")
+        self.assertEqual(runtime["image_model_name"], "doubao-seedream-5.0-lite")
+        self.assertEqual(config["generation"]["workers"], 3)
+
     def test_generation_runtime_keeps_localizer_cli_args_separate(self) -> None:
         config = load_config(ROOT / "configs" / "autolabel.yaml")
         generation = resolve_generation_runtime(config)
@@ -459,6 +484,54 @@ class ContractTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0)
             self.assertEqual(calls[0]["image_model"], "doubao-seedream-5.0-lite")
+
+    def test_generation_module_passes_vlm_model_to_i2i(self) -> None:
+        from autolabel.modules.generation.i2i_external import ExternalI2IGenerationModule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_water",
+                        "image_id": "image_water",
+                        "image_uri": str(root / "water.jpg"),
+                        "anomaly_type": "water_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "anomaly_type", "source_type", "task_mode"],
+            )
+            config = load_config(ROOT / "configs" / "autolabel.yaml")
+            config["models"]["generation"]["vlm"]["private_grid_selector"] = {
+                "provider": "custom",
+                "model_name": "private-vlm-grid",
+                "credential_ref": "local_or_private_model",
+            }
+            config["generation"]["vlm_model_key"] = "private_grid_selector"
+            calls = []
+
+            class FakeCompleted:
+                returncode = 0
+                stdout = "ok\n"
+                stderr = ""
+
+            def fake_run(self, **kwargs):
+                calls.append(kwargs)
+                return FakeCompleted()
+
+            with patch("autolabel.modules.generation.i2i_external.I2IGenerator.run", new=fake_run):
+                result = ExternalI2IGenerationModule(config, {}).run(
+                    tasks_csv=manifest_path,
+                    image_root=root,
+                    output_root=root / "out",
+                )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(calls[0]["vlm_model"], "private-vlm-grid")
 
     def test_generation_module_normalizes_water_leak_for_external_backend_alias(self) -> None:
         from autolabel.modules.generation.i2i_external import ExternalI2IGenerationModule

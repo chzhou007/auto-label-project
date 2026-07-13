@@ -1108,6 +1108,7 @@ python -m autolabel.modules.generation.main `
 Seedream5.0 water leak calibration and production:
 
 ```powershell
+$env:I2I_PROJECT_DIR="C:\path\to\I2I"
 $env:ARK_API_KEY="..."
 $env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
 $env:SEEDREAM_IMAGE_MODEL="doubao-seedream-5.0-lite"
@@ -1122,6 +1123,7 @@ python scripts/run_pipeline.py `
   --branches generation,export `
   --manifest data/staging/image_sequence/water_leak_generation_1000.csv `
   --processed-root data/runs/water_leak_seedream5_calibration `
+  --generation-vlm-model-key qwen_grid_selector `
   --generation-image-model-key seedream5_image_editor `
   --generation-workers 1 `
   --generation-limit 50 `
@@ -1132,6 +1134,7 @@ python scripts/run_pipeline.py `
   --branches generation,export `
   --manifest data/staging/image_sequence/water_leak_generation_1000.csv `
   --processed-root data/runs/water_leak_seedream5_1000 `
+  --generation-vlm-model-key qwen_grid_selector `
   --generation-image-model-key seedream5_image_editor `
   --generation-workers 1 `
   --generation-limit 1000 `
@@ -1139,6 +1142,26 @@ python scripts/run_pipeline.py `
 ```
 
 The export branch keeps direct samples unchanged, but generated samples are exported only when every generated object has `localizer.postprocess_status=success` and `quality.passes_quality=true`. Rejected generated samples are written to `exports/labelstudio/rejected_generated_quality.json` under the selected `--processed-root`.
+
+Generation model switching has two separate stages. Both are explicit on purpose:
+
+- `--generation-vlm-model-key` selects the grid/region VLM profile.
+- `--generation-image-model-key` selects the image editing profile.
+
+If you only pass `--generation-image-model-key seedream5_image_editor`, only the I2I image editing model changes; the grid selector remains the configured `generation.vlm_model_key`. To select a private VLM profile from this repository, set `CUSTOM_VLM_MODEL`, `PRIVATE_MODEL_API_KEY`, and `CUSTOM_VLM_ENDPOINT`, then run with `--generation-vlm-model-key custom_grid_selector`.
+
+Important external I2I compatibility note:
+
+- This repository now resolves and passes both selected model names into the external I2I process as `--vlm-model` and `--image-model`.
+- It also passes each selected model profile's env values into the subprocess.
+- The stock external I2I still instantiates its legacy `QwenVLMClient` and `WanImageClient` classes. In that version, `DashScopeConfig` reads `DASHSCOPE_API_KEY`, `DASHSCOPE_VLM_ENDPOINT`, and `DASHSCOPE_WAN_ENDPOINT`, with one shared API key for both stages.
+- Therefore, true mixed-provider runs such as Qwen/DashScope for grid selection plus Ark Seedream for image editing require the external I2I config/client layer to be provider-aware and to read the Seedream envs above. Without that I2I-side update, the repo CLI will show the intended model chain in preflight, but the legacy I2I client may still call its DashScope endpoints.
+
+For current production runs, read the preflight line before spending API quota. It prints the effective model chain as:
+
+```text
+models=water_leak:<vlm_model_name>-><image_model_name>
+```
 
 ### 17.6 Recommended Config
 

@@ -33,10 +33,13 @@ def configure_processed_root(config: dict[str, Any], processed_root: str | Path 
 def apply_generation_run_overrides(
     config: dict[str, Any],
     *,
+    vlm_model_key: str | None = None,
     image_model_key: str | None = None,
     workers: int | None = None,
 ) -> dict[str, Any]:
     generation_cfg = config.setdefault("generation", {})
+    if vlm_model_key:
+        generation_cfg["vlm_model_key"] = vlm_model_key
     if image_model_key:
         generation_cfg["image_model_key"] = image_model_key
     if workers is not None:
@@ -88,11 +91,16 @@ def run_generation_branch(
                 f"manifest_rows={report.get('manifest_rows', 0)}"
             )
         else:
+            model_pairs = [
+                f"{anomaly}:{runtime.get('vlm_model_name')}->{runtime.get('image_model_name')}"
+                for anomaly, runtime in sorted((report.get("runtime_by_anomaly") or {}).items())
+            ]
             print(
                 "Generation preflight: "
                 f"generation_rows={report.get('generation_rows')}, "
                 f"effective_rows={report.get('effective_generation_rows')}, "
                 f"anomaly_types={','.join(report.get('anomaly_types', []))}, "
+                f"models={';'.join(model_pairs)}, "
                 f"i2i_entrypoint={report.get('i2i_entrypoint')}"
             )
     result = module.run(
