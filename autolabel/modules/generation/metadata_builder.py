@@ -289,6 +289,9 @@ def _run_localizer(
     anomaly_type: str,
     mask_output_path: Path,
     debug_dir: Path,
+    sample_id: str | None = None,
+    object_id: str | None = None,
+    attempt_role: str | None = None,
 ) -> tuple[Any, float]:
     localizer = create_localizer(localizer_name, **build_localizer_kwargs(localizer_name, localizer_cfg))
     start = perf_counter()
@@ -299,6 +302,9 @@ def _run_localizer(
         anomaly_type=anomaly_type,
         mask_output_path=str(mask_output_path),
         debug_dir=str(debug_dir),
+        sample_id=sample_id,
+        object_id=object_id,
+        attempt_role=attempt_role,
     )
     elapsed_ms = round((perf_counter() - start) * 1000.0, 3)
     return result, elapsed_ms
@@ -500,6 +506,9 @@ def apply_localizer_postprocess(
             anomaly_type=anomaly_type,
             mask_output_path=primary_mask_path,
             debug_dir=debug_root,
+            sample_id=processed["sample_id"],
+            object_id=obj["object_id"],
+            attempt_role="primary",
         )
         primary_quality, primary_benchmark, primary_effective_success, primary_reason, primary_row, primary_attempt = _evaluate_attempt(
             sample_id=processed["sample_id"],
@@ -557,6 +566,9 @@ def apply_localizer_postprocess(
                 anomaly_type=anomaly_type,
                 mask_output_path=fallback_mask_path,
                 debug_dir=debug_root,
+                sample_id=processed["sample_id"],
+                object_id=obj["object_id"],
+                attempt_role="fallback",
             )
             fallback_quality, fallback_benchmark, fallback_effective_success, fallback_reason, fallback_row, fallback_attempt = _evaluate_attempt(
                 sample_id=processed["sample_id"],
@@ -633,6 +645,9 @@ def apply_localizer_postprocess(
                 anomaly_type=anomaly_type,
                 mask_output_path=sidecar_mask_path,
                 debug_dir=debug_root,
+                sample_id=processed["sample_id"],
+                object_id=obj["object_id"],
+                attempt_role="sidecar",
             )
             sidecar_quality, sidecar_benchmark, sidecar_effective_success, sidecar_reason, sidecar_row, _sidecar_attempt = _evaluate_attempt(
                 sample_id=processed["sample_id"],

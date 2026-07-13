@@ -79,6 +79,28 @@ def test_pgcd_zero_heatmap_returns_failure(no_change_pair) -> None:
     assert data.get("reason") in {"no_change", "no_component", "empty_heatmap", "below_threshold"} or data.get("reason")
 
 
+def test_pgcd_adaptive_threshold_mode_localizes(simple_change_pair) -> None:
+    backend = FakeHeatmapBackend([simple_change_pair["gt_bbox"]], image_size=simple_change_pair["image_size"])
+    localizer = make_pgcd_localizer(
+        heatmap_backend=backend,
+        min_component_area=100,
+        threshold_mode="adaptive",
+        debug=False,
+    )
+    mask_path = Path(simple_change_pair["output_dir"]) / "pgcd_adaptive_mask.png"
+    result = localizer.localize(
+        original_image_path=str(simple_change_pair["original_path"]),
+        generated_image_path=str(simple_change_pair["generated_path"]),
+        prompt_box=list(simple_change_pair["prompt_box"]),
+        anomaly_type="water_leak",
+        mask_output_path=str(mask_path),
+        debug_dir=str(simple_change_pair["output_dir"]),
+    )
+    data = result_to_dict(result)
+    assert data["success"], data.get("reason")
+    assert data["metrics"]["pgcd_heatmap_threshold"] > 0.0
+
+
 def test_pgcd_debug_artifacts_are_written(simple_change_pair) -> None:
     backend = FakeHeatmapBackend([simple_change_pair["gt_bbox"]], image_size=simple_change_pair["image_size"])
     localizer = make_pgcd_localizer(heatmap_backend=backend, min_component_area=100, debug=True)
@@ -110,6 +132,47 @@ def test_pgcd_debug_artifacts_are_written(simple_change_pair) -> None:
     assert components
     assert "component_score" in components[0]
     assert "prompt_iou_score" in components[0]
+
+
+def test_pgcd_debug_artifacts_are_namespaced_by_attempt(simple_change_pair) -> None:
+    debug_dir = Path(simple_change_pair["output_dir"]) / "namespaced_debug"
+    debug_dir.mkdir()
+
+    first_backend = FakeHeatmapBackend([simple_change_pair["gt_bbox"]], image_size=simple_change_pair["image_size"])
+    first_localizer = make_pgcd_localizer(heatmap_backend=first_backend, min_component_area=100, debug=True)
+    first_result = first_localizer.localize(
+        original_image_path=str(simple_change_pair["original_path"]),
+        generated_image_path=str(simple_change_pair["generated_path"]),
+        prompt_box=list(simple_change_pair["prompt_box"]),
+        anomaly_type="water_leak",
+        mask_output_path=str(Path(simple_change_pair["output_dir"]) / "pgcd_primary_mask.png"),
+        debug_dir=str(debug_dir),
+        sample_id="sample_001",
+        object_id="obj_001",
+        attempt_role="primary",
+    )
+
+    second_backend = FakeHeatmapBackend([simple_change_pair["gt_bbox"]], image_size=simple_change_pair["image_size"])
+    second_localizer = make_pgcd_localizer(heatmap_backend=second_backend, min_component_area=100, debug=True)
+    second_result = second_localizer.localize(
+        original_image_path=str(simple_change_pair["original_path"]),
+        generated_image_path=str(simple_change_pair["generated_path"]),
+        prompt_box=list(simple_change_pair["prompt_box"]),
+        anomaly_type="water_leak",
+        mask_output_path=str(Path(simple_change_pair["output_dir"]) / "pgcd_fallback_mask.png"),
+        debug_dir=str(debug_dir),
+        sample_id="sample_001",
+        object_id="obj_001",
+        attempt_role="fallback",
+    )
+
+    first_data = result_to_dict(first_result)
+    second_data = result_to_dict(second_result)
+    assert first_data["success"]
+    assert second_data["success"]
+    assert first_data["debug_artifacts"]["heatmap"] != second_data["debug_artifacts"]["heatmap"]
+    assert Path(first_data["debug_artifacts"]["heatmap"]).exists()
+    assert Path(second_data["debug_artifacts"]["heatmap"]).exists()
 
 
 def test_pgcd_handles_resized_generated_image(resized_generated_pair) -> None:

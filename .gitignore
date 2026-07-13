@@ -17,6 +17,7 @@ data/processed/i2i_outputs/*
 data/exports/*
 data/qc/*
 data/runs/*
+external/I2I/
 
 !data/raw/images/.gitkeep
 !data/raw/videos/.gitkeep
@@ -26,3 +27,4 @@ data/runs/*
 !data/processed/metadata/.gitkeep
 !data/exports/labelstudio/.gitkeep
 !data/qc/.gitkeep
+!external/.gitkeep

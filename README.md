@@ -145,7 +145,7 @@ credentials:
     base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
 
 paths:
-  i2i_project: C:\Users\chang\Documents\数据标注\I2I
+  i2i_project: ${I2I_PROJECT_DIR:-external/I2I}
   classification_script: scripts/classification.py
   raw_images_dir: data/raw/images
   raw_videos_dir: data/raw/videos
@@ -156,10 +156,13 @@ paths:
 
 modules:
   generation:
-    backend: i2i_external
+    backend: vlm_wan_autolabel
     backends:
       i2i_external:
-        project_dir: C:\Users\chang\Documents\数据标注\I2I
+        project_dir: ${I2I_PROJECT_DIR:-external/I2I}
+      vlm_wan_autolabel:
+        project_dir: ${I2I_PROJECT_DIR:-external/I2I}
+        pass_localizer_cli_args: false
   classification:
     backend: external_script
     backends:
@@ -989,7 +992,7 @@ Recommended entrypoints:
 
 Before running this version, make sure:
 
-1. `configs/autolabel.yaml` points `paths.i2i_project` and `modules.generation.backends.vlm_wan_autolabel.project_dir` to the external I2I repo.
+1. The external I2I repo is available at `${I2I_PROJECT_DIR}` or at the relative default `external/I2I`.
 2. Your manifest rows for generation include `task_mode=generation` and `anomaly_type`.
 3. The required model credentials are set in environment variables or config.
 4. Dependencies are installed:
@@ -997,6 +1000,14 @@ Before running this version, make sure:
 ```powershell
 python -m pip install -r requirements.txt
 ```
+
+On Windows, if you keep I2I outside this repository:
+
+```powershell
+$env:I2I_PROJECT_DIR="C:\Users\chang\Documents\数据标注\I2I"
+```
+
+The localizer configuration is applied during metadata ingest in this repository. It is not passed to the external I2I CLI unless `modules.generation.backends.<backend>.pass_localizer_cli_args: true` is set for a newer compatible I2I entrypoint.
 
 ### 17.2 Recommended Production Command
 
@@ -1014,6 +1025,8 @@ This command:
 - ingests generated metadata into `data/processed/metadata`
 - runs localizer postprocess during ingest
 - writes benchmark and audit outputs when `modules.generation.localizer.benchmark: true`
+
+For batch generation, put all rows in `data/staging/image_sequence/manifest.csv` and increase `generation.workers` in `configs/autolabel.yaml` when the upstream API quota can handle parallel requests.
 
 ### 17.3 Generation-Only Script
 
@@ -1091,6 +1104,41 @@ python -m autolabel.modules.generation.main `
   --sam2-model tiny `
   --benchmark
 ```
+
+Seedream5.0 water leak calibration and production:
+
+```powershell
+$env:ARK_API_KEY="..."
+$env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
+$env:SEEDREAM_IMAGE_MODEL="doubao-seedream-5.0-lite"
+
+python scripts/prepare_water_leak_manifest.py `
+  --input data/staging/image_sequence/manifest.csv `
+  --output data/staging/image_sequence/water_leak_generation_1000.csv `
+  --count 1000
+
+python scripts/run_pipeline.py `
+  --config configs/autolabel.yaml `
+  --branches generation,export `
+  --manifest data/staging/image_sequence/water_leak_generation_1000.csv `
+  --processed-root data/runs/water_leak_seedream5_calibration `
+  --generation-image-model-key seedream5_image_editor `
+  --generation-workers 1 `
+  --generation-limit 50 `
+  --skip-existing-generation
+
+python scripts/run_pipeline.py `
+  --config configs/autolabel.yaml `
+  --branches generation,export `
+  --manifest data/staging/image_sequence/water_leak_generation_1000.csv `
+  --processed-root data/runs/water_leak_seedream5_1000 `
+  --generation-image-model-key seedream5_image_editor `
+  --generation-workers 1 `
+  --generation-limit 1000 `
+  --skip-existing-generation
+```
+
+The export branch keeps direct samples unchanged, but generated samples are exported only when every generated object has `localizer.postprocess_status=success` and `quality.passes_quality=true`. Rejected generated samples are written to `exports/labelstudio/rejected_generated_quality.json` under the selected `--processed-root`.
 
 ### 17.6 Recommended Config
 
@@ -1191,6 +1239,7 @@ Artifact paths such as `mask_uri`, `crop_uri`, `wan_response_path`, and `pgcd_he
 - `sidecar_eval` now supports one localizer, a comma-separated list such as `pgcd_lpips,pgcd_lpips_sam2`, or a YAML list.
 - Benchmark rows now carry real `bbox_iou`, `precision`, `recall`, `mask_iou`, `fallback_rate`, and `quality_pass_rate` signals instead of fixed zero values.
 - Localizer metadata now records `benchmark`, `quality`, and `attempts`, and benchmark logs additionally emit `localizer_failure_summary_*.json`.
+- Localizer CLI flags are repository-local ingest settings by default. They are not forwarded to the external I2I CLI unless `pass_localizer_cli_args: true` is explicitly enabled for a compatible backend.
 
 当前 generation 分支已经接入路线文档中的 localizer 架构。默认 backend 为 `vlm_wan_autolabel`，它仍复用现有 I2I 项目完成生成，但会在 metadata ingest 阶段执行仓库内的 localizer 后处理，并输出 benchmark 与 audit 产物。
 

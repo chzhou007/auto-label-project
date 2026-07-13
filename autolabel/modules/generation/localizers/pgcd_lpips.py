@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from ....utils import ensure_dir
+from ....utils import ensure_dir, slugify
 from .base import BaseLocalizer, LocalizationInput, LocalizationResult
 from .components import clamp_bbox, extract_components
 from .image_alignment import load_aligned_images
@@ -56,6 +56,17 @@ class PGCDLPIPSLocalizer(BaseLocalizer):
         self.threshold_mode = str(config.get("threshold_mode", config.get("threshold", threshold_mode)))
         self.prompt_prior_weights = dict(DEFAULT_WEIGHTS)
         self.prompt_prior_weights.update(prompt_prior_weights or config.get("prompt_prior_weights") or {})
+
+    def _debug_path(self, data: LocalizationInput, filename: str) -> Path:
+        if data.debug_dir is None:
+            raise ValueError("debug_dir is required for debug artifacts")
+        debug_dir = ensure_dir(data.debug_dir)
+        context_parts = [data.sample_id, data.object_id, data.attempt_role]
+        if not any(context_parts):
+            return debug_dir / filename
+        parts = [*context_parts, self.method_name]
+        prefix = slugify("_".join(str(part) for part in parts if part))
+        return debug_dir / f"{prefix}_{filename}" if prefix else debug_dir / filename
 
     def localize(self, inp: LocalizationInput | None = None, **kwargs: Any) -> LocalizationResult:
         data = self.coerce_input(inp, **kwargs)
@@ -124,9 +135,8 @@ class PGCDLPIPSLocalizer(BaseLocalizer):
             debug_artifacts: dict[str, str] = {}
             if not components:
                 if self.debug and data.debug_dir:
-                    debug_dir = ensure_dir(data.debug_dir)
-                    debug_artifacts["heatmap"] = _save_gray_image(heatmap, debug_dir / "pgcd_heatmap.png")
-                    debug_artifacts["binary_mask"] = _save_binary_mask(binary_mask, debug_dir / "pgcd_binary_mask.png")
+                    debug_artifacts["heatmap"] = _save_gray_image(heatmap, self._debug_path(data, "pgcd_heatmap.png"))
+                    debug_artifacts["binary_mask"] = _save_binary_mask(binary_mask, self._debug_path(data, "pgcd_binary_mask.png"))
                     metrics["pgcd_heatmap_path"] = debug_artifacts["heatmap"]
                 return LocalizationResult(False, None, None, self.method_name, metrics, reason="no_component", debug_artifacts=debug_artifacts)
 
@@ -151,14 +161,13 @@ class PGCDLPIPSLocalizer(BaseLocalizer):
 
             mask_path = _save_binary_mask(final_mask, data.mask_output_path)
             if self.debug and data.debug_dir:
-                debug_dir = ensure_dir(data.debug_dir)
-                debug_artifacts["heatmap"] = _save_gray_image(heatmap, debug_dir / "pgcd_heatmap.png")
-                debug_artifacts["binary_mask"] = _save_binary_mask(binary_mask, debug_dir / "pgcd_binary_mask.png")
+                debug_artifacts["heatmap"] = _save_gray_image(heatmap, self._debug_path(data, "pgcd_heatmap.png"))
+                debug_artifacts["binary_mask"] = _save_binary_mask(binary_mask, self._debug_path(data, "pgcd_binary_mask.png"))
                 metrics["pgcd_heatmap_path"] = debug_artifacts["heatmap"]
-                components_path = debug_dir / "pgcd_components.json"
+                components_path = self._debug_path(data, "pgcd_components.json")
                 components_path.write_text(json.dumps(scored_components, ensure_ascii=False, indent=2), encoding="utf-8")
                 debug_artifacts["components"] = str(components_path)
-                selected_path = debug_dir / "pgcd_selected_component.json"
+                selected_path = self._debug_path(data, "pgcd_selected_component.json")
                 selected_path.write_text(json.dumps(selected, ensure_ascii=False, indent=2), encoding="utf-8")
                 debug_artifacts["selected_component"] = str(selected_path)
 

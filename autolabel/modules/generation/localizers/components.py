@@ -171,8 +171,21 @@ def extract_components(
     roi = heatmap[py1:py2, px1:px2]
     if roi.size == 0:
         return np.zeros_like(heatmap, dtype=bool), [], 0.0
-    if threshold_mode == "fixed":
+    normalized_threshold_mode = str(threshold_mode or "otsu").strip().lower()
+    if normalized_threshold_mode == "fixed":
         threshold = float(fixed_threshold if fixed_threshold is not None else 0.5)
+    elif normalized_threshold_mode == "adaptive":
+        positive_roi = roi[roi > 0]
+        positive_values = positive_roi if positive_roi.size else heatmap[heatmap > 0]
+        if positive_values.size == 0:
+            return np.zeros_like(heatmap, dtype=bool), [], 0.0
+        threshold = float(
+            max(
+                np.percentile(positive_values, 75),
+                positive_values.mean() + 0.25 * positive_values.std(),
+                0.05,
+            )
+        )
     else:
         threshold = otsu_threshold(roi if np.any(roi > 0) else heatmap)
     if threshold <= 0:

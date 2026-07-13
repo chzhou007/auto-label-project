@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ...config_loader import load_config
-from ...orchestrator import run_generation_branch
+from ...orchestrator import apply_generation_run_overrides, configure_processed_root, run_generation_branch
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -19,6 +19,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tasks", default=None)
     parser.add_argument("--image-root", default=None)
     parser.add_argument("--output-root", default=None)
+    parser.add_argument("--processed-root", default=None)
+    parser.add_argument("--generation-image-model-key", default=None)
+    parser.add_argument("--generation-workers", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
@@ -88,6 +91,12 @@ def main() -> int:
     args = parser.parse_args()
 
     config = apply_generation_cli_overrides(load_config(args.config), args)
+    configure_processed_root(config, args.processed_root)
+    apply_generation_run_overrides(
+        config,
+        image_model_key=args.generation_image_model_key,
+        workers=args.generation_workers,
+    )
     return run_generation_branch(
         config,
         tasks_csv=args.tasks,
@@ -97,6 +106,7 @@ def main() -> int:
         skip_existing=args.skip_existing,
         limit=args.limit,
         ingest_metadata=not args.no_ingest_generated,
+        preflight=True,
     )
 
 

@@ -49,8 +49,19 @@ class ExternalI2IGenerationModule:
         write_csv(target, rows, I2I_TASK_FIELDS)
         return target
 
+    def pass_localizer_cli_args(self) -> bool:
+        return bool(self.module_config.get("pass_localizer_cli_args", False))
+
     def build_runtime_groups(self, rows: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+        if not self.pass_localizer_cli_args():
+            return [("default", rows)]
         return group_generation_rows_by_localizer_policy(self.pipeline_config, rows)
+
+    def build_extra_cli_args(self, runtime: dict[str, Any]) -> list[str]:
+        args = [str(arg) for arg in runtime.get("extra_cli_args", []) if str(arg)]
+        if self.pass_localizer_cli_args():
+            args.extend(str(arg) for arg in runtime.get("localizer_cli_args", []) if str(arg))
+        return args
 
     def run(
         self,
@@ -101,7 +112,7 @@ class ExternalI2IGenerationModule:
                 skip_existing=skip_existing or bool(generation_cfg.get("skip_existing", False)),
                 limit=limit,
                 env=runtime["env"],
-                extra_cli_args=runtime.get("extra_cli_args"),
+                extra_cli_args=self.build_extra_cli_args(runtime),
             )
             if completed.stdout:
                 combined_stdout.append(completed.stdout)

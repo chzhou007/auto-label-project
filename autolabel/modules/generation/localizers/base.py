@@ -16,7 +16,9 @@ class LocalizationInput:
     output_mask_path: Path
     grid_bbox: list[int] | None = None
     sample_id: str | None = None
+    object_id: str | None = None
     task_id: str | None = None
+    attempt_role: str | None = None
     debug_dir: Path | None = None
     image_size: tuple[int, int] | None = None
     generation_params: dict[str, Any] = field(default_factory=dict)
@@ -35,7 +37,9 @@ class LocalizationInput:
                 else None
             ),
             sample_id=kwargs.get("sample_id"),
+            object_id=kwargs.get("object_id"),
             task_id=kwargs.get("task_id"),
+            attempt_role=kwargs.get("attempt_role"),
             debug_dir=Path(kwargs["debug_dir"]) if kwargs.get("debug_dir") else None,
             image_size=kwargs.get("image_size"),
             generation_params=dict(kwargs.get("generation_params") or {}),

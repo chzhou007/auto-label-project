@@ -15,6 +15,10 @@ credentials:
     api_key_env: DASHSCOPE_API_KEY
     api_key: ${DASHSCOPE_API_KEY}
 
+  ark_seedream_generation:
+    api_key_env: ARK_API_KEY
+    api_key: ${ARK_API_KEY}
+
   qwen_classifier:
     api_key_env: QWEN397B_API_KEY
     api_key: ${QWEN397B_API_KEY}
@@ -31,7 +35,7 @@ credentials:
     base_url: ${PRIVATE_MODEL_BASE_URL}
 
 paths:
-  i2i_project: C:\Users\chang\Documents\数据标注\I2I
+  i2i_project: ${I2I_PROJECT_DIR:-external/I2I}
   classification_script: scripts/classification.py
   raw_images_dir: data/raw/images
   raw_videos_dir: data/raw/videos
@@ -98,11 +102,12 @@ modules:
         fallback: pgcd_lpips
     backends:
       i2i_external:
-        project_dir: C:\Users\chang\Documents\数据标注\I2I
+        project_dir: ${I2I_PROJECT_DIR:-external/I2I}
         entrypoint: src/main.py
       vlm_wan_autolabel:
-        project_dir: C:\Users\chang\Documents\鏁版嵁鏍囨敞\I2I
+        project_dir: ${I2I_PROJECT_DIR:-external/I2I}
         entrypoint: src/main.py
+        pass_localizer_cli_args: false
 
   classification:
     backend: external_script
@@ -154,6 +159,20 @@ models:
         api_key_env: DASHSCOPE_API_KEY
         endpoint_env: DASHSCOPE_WAN_ENDPOINT
         endpoint: ${DASHSCOPE_WAN_ENDPOINT}
+
+      seedream5_image_editor:
+        provider: volcengine_ark
+        model_name: ${SEEDREAM_IMAGE_MODEL:-doubao-seedream-5.0-lite}
+        model_version: null
+        credential_ref: ark_seedream_generation
+        api_key_env: ARK_API_KEY
+        api_key_env_aliases:
+          - SEEDREAM_API_KEY
+        endpoint_env: SEEDREAM_BASE_URL
+        endpoint_env_aliases:
+          - SEEDREAM_ENDPOINT
+          - ARK_BASE_URL
+        endpoint: ${SEEDREAM_BASE_URL:-https://ark.cn-beijing.volces.com/api/plan/v3/images/generations}
 
       custom_i2i_generator:
         provider: custom
@@ -456,3 +475,6 @@ export:
   export_format: labelstudio
   export_status: not_exported
   labelstudio_mapping: null
+  generated_quality_gate:
+    enabled: true
+    rejected_report: data/exports/labelstudio/rejected_generated_quality.json

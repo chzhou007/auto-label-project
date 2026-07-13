@@ -4,11 +4,44 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .adapters.i2i_generator import iter_generated_metadata
 from .adapters.detector_service import load_detector_config
 from .exporters.labelstudio import export_metadata_dir
 from .model_config import build_detector_runtime_config
 from .modules.generation import build_generation_module
+from .modules.generation.preflight import run_generation_preflight
 from .pipeline import ingest_generated_metadata, run_direct_pipeline
+
+
+def configure_processed_root(config: dict[str, Any], processed_root: str | Path | None) -> dict[str, Any]:
+    if processed_root is None:
+        return config
+    root = Path(processed_root)
+    paths = config.setdefault("paths", {})
+    paths["metadata_dir"] = str(root / "metadata")
+    paths["crop_dir"] = str(root / "crops")
+    paths["i2i_output_dir"] = str(root / "i2i_outputs")
+    paths["export_dir"] = str(root / "exports")
+    paths["labelstudio_export"] = str(root / "exports" / "labelstudio" / "import.json")
+    export_cfg = config.setdefault("export", {})
+    quality_gate_cfg = export_cfg.get("generated_quality_gate")
+    if isinstance(quality_gate_cfg, dict):
+        quality_gate_cfg["rejected_report"] = str(root / "exports" / "labelstudio" / "rejected_generated_quality.json")
+    return config
+
+
+def apply_generation_run_overrides(
+    config: dict[str, Any],
+    *,
+    image_model_key: str | None = None,
+    workers: int | None = None,
+) -> dict[str, Any]:
+    generation_cfg = config.setdefault("generation", {})
+    if image_model_key:
+        generation_cfg["image_model_key"] = image_model_key
+    if workers is not None:
+        generation_cfg["workers"] = int(workers)
+    return config
 
 
 def default_manifest(config: dict[str, Any]) -> str:
@@ -32,14 +65,39 @@ def run_generation_branch(
     skip_existing: bool = False,
     limit: int | None = None,
     ingest_metadata: bool = True,
+    preflight: bool = False,
 ) -> int:
     paths = config.get("paths", {})
     generation_cfg = config.get("generation", {})
     module = build_generation_module(config)
     output_root = output_root or paths.get("i2i_output_dir") or "data/processed/i2i_outputs"
+    tasks_csv = tasks_csv or default_manifest(config)
+    image_root = image_root or default_image_root(config)
+    if preflight:
+        report = run_generation_preflight(
+            config,
+            tasks_csv=tasks_csv,
+            image_root=image_root,
+            output_root=output_root,
+            limit=limit,
+            require_credentials=not (dry_run or bool(generation_cfg.get("dry_run", False))),
+        )
+        if report.get("skipped"):
+            print(
+                f"Generation preflight: no generation rows found in {tasks_csv}; "
+                f"manifest_rows={report.get('manifest_rows', 0)}"
+            )
+        else:
+            print(
+                "Generation preflight: "
+                f"generation_rows={report.get('generation_rows')}, "
+                f"effective_rows={report.get('effective_generation_rows')}, "
+                f"anomaly_types={','.join(report.get('anomaly_types', []))}, "
+                f"i2i_entrypoint={report.get('i2i_entrypoint')}"
+            )
     result = module.run(
-        tasks_csv=tasks_csv or default_manifest(config),
-        image_root=image_root or default_image_root(config),
+        tasks_csv=tasks_csv,
+        image_root=image_root,
         output_root=output_root,
         dry_run=dry_run or bool(generation_cfg.get("dry_run", False)),
         skip_existing=skip_existing or bool(generation_cfg.get("skip_existing", False)),
@@ -53,13 +111,15 @@ def run_generation_branch(
         return result.returncode
     if getattr(result, "skipped", False):
         return 0
+    generated_count = len(iter_generated_metadata(output_root))
+    print(f"Generated metadata files found: {generated_count}")
     if ingest_metadata:
         metadata_dir = paths.get("metadata_dir", "data/processed/metadata")
         written = ingest_generated_metadata(
             output_root,
             metadata_dir,
             pipeline_config=config,
-            tasks_csv=tasks_csv or default_manifest(config),
+            tasks_csv=tasks_csv,
         )
         print(f"Ingested {len(written)} generated AutoLabelSample files into {metadata_dir}")
     return 0
@@ -110,8 +170,36 @@ def run_labelstudio_export(
     update_samples: bool = False,
 ) -> int:
     paths = config.get("paths", {})
+    export_cfg = config.get("export", {}) if isinstance(config.get("export"), dict) else {}
+    quality_gate_cfg = (
+        export_cfg.get("generated_quality_gate", {})
+        if isinstance(export_cfg.get("generated_quality_gate"), dict)
+        else {}
+    )
+    generated_quality_gate = bool(quality_gate_cfg.get("enabled", False))
+    rejected_report_path = quality_gate_cfg.get("rejected_report")
     metadata_dir = metadata_dir or paths.get("metadata_dir", "data/processed/metadata")
     output_path = output_path or paths.get("labelstudio_export", "data/exports/labelstudio/import.json")
-    tasks = export_metadata_dir(metadata_dir, output_path, update_samples=update_samples)
+    tasks = export_metadata_dir(
+        metadata_dir,
+        output_path,
+        update_samples=update_samples,
+        generated_quality_gate=generated_quality_gate,
+        rejected_report_path=rejected_report_path,
+    )
     print(f"Wrote {len(tasks)} Label Studio tasks to {output_path}")
+    if generated_quality_gate:
+        report_path = rejected_report_path or Path(output_path).with_name("rejected_generated_quality.json")
+        try:
+            from .utils import read_json
+
+            report = read_json(report_path)
+            print(
+                "Export quality gate: "
+                f"generated={report.get('generated_samples', 0)}, "
+                f"exportable={report.get('exported_generated_samples', 0)}, "
+                f"rejected={report.get('rejected_samples', 0)}"
+            )
+        except Exception:
+            print(f"Export quality gate report path: {report_path}")
     return 0

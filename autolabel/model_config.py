@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import os
 from typing import Any
 
 
@@ -34,6 +35,32 @@ def _normalize_name_list(value: Any) -> list[str]:
                     names.append(name)
         return names
     return [str(value)]
+
+
+def _normalize_cli_args(value: Any) -> list[str]:
+    if value in ("", None, False):
+        return []
+    if isinstance(value, str):
+        return [item for item in value.split() if item]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item)]
+    return [str(value)]
+
+
+def _normalize_env_names(value: Any) -> list[str]:
+    names: list[str] = []
+    for name in _normalize_name_list(value):
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _first_env_value(names: list[str]) -> str | None:
+    for name in names:
+        value = _non_empty(os.getenv(name))
+        if value:
+            return str(value)
+    return None
 
 
 def get_credentials(config: dict[str, Any], credential_ref: str | None) -> dict[str, Any]:
@@ -105,15 +132,27 @@ def resolve_generation_runtime(config: dict[str, Any], anomaly_type: str | None 
     env = {}
     for profile in (vlm_profile, image_profile):
         credential = get_credentials(config, profile.get("credential_ref"))
-        api_key = _non_empty(profile.get("api_key")) or _non_empty(credential.get("api_key"))
-        api_key_env = profile.get("api_key_env") or credential.get("api_key_env")
-        if api_key and api_key_env:
-            env[api_key_env] = api_key
+        api_key_env_names = _normalize_env_names(profile.get("api_key_env") or credential.get("api_key_env"))
+        api_key_env_names.extend(
+            name for name in _normalize_env_names(profile.get("api_key_env_aliases")) if name not in api_key_env_names
+        )
+        api_key = (
+            _non_empty(profile.get("api_key"))
+            or _non_empty(credential.get("api_key"))
+            or _first_env_value(api_key_env_names)
+        )
+        if api_key:
+            for api_key_env in api_key_env_names:
+                env[api_key_env] = api_key
 
         endpoint = _non_empty(profile.get("endpoint"))
-        endpoint_env = profile.get("endpoint_env")
-        if endpoint and endpoint_env:
-            env[endpoint_env] = endpoint
+        endpoint_env_names = _normalize_env_names(profile.get("endpoint_env"))
+        endpoint_env_names.extend(
+            name for name in _normalize_env_names(profile.get("endpoint_env_aliases")) if name not in endpoint_env_names
+        )
+        if endpoint:
+            for endpoint_env in endpoint_env_names:
+                env[endpoint_env] = endpoint
 
     localizer_cfg = resolve_localizer_config(config, anomaly_type=anomaly_type)
 
@@ -124,7 +163,11 @@ def resolve_generation_runtime(config: dict[str, Any], anomaly_type: str | None 
         "image_profile": image_profile,
         "env": env,
         "localizer_config": localizer_cfg,
-        "extra_cli_args": build_generation_extra_cli_args(localizer_cfg),
+        "localizer_cli_args": build_generation_extra_cli_args(localizer_cfg),
+        # Localizer is applied during metadata ingest inside this repo. Keep
+        # external generation CLI args separate so old I2I entrypoints do not
+        # fail on repo-local flags such as --localizer.
+        "extra_cli_args": _normalize_cli_args(generation_cfg.get("extra_cli_args")),
     }
 
 

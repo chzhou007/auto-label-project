@@ -27,8 +27,10 @@ from autolabel.config_loader import load_config
 from autolabel.contract_normalizer import normalize_autolabel_sample
 from autolabel.model_config import build_detector_runtime_config, resolve_classification_runtime, resolve_generation_runtime
 from autolabel.modules.classification.dry_run import DryRunClassificationModule
+from autolabel.modules.generation.manifest_builder import write_water_leak_generation_manifest
+from autolabel.modules.generation.preflight import run_generation_preflight
 from autolabel.preprocess import estimate_extracted_frame_count
-from autolabel.exporters.labelstudio import build_labelstudio_config, sample_to_labelstudio_task
+from autolabel.exporters.labelstudio import build_labelstudio_config, export_metadata_dir, sample_to_labelstudio_task
 from autolabel.sample_factory import make_object
 from autolabel.utils import read_csv, read_json, write_csv, write_json
 from autolabel.validators import ValidationError, validate_sample_contract
@@ -170,6 +172,52 @@ class ContractTests(unittest.TestCase):
         self.assertIn('<Choices name="cls_helmet" toName="image" perRegion="true"', config_xml)
         self.assertIn('<Choice value="wearing_helmet"/>', config_xml)
 
+    def test_labelstudio_generated_quality_gate_rejects_failed_generated_samples(self) -> None:
+        def generated_sample(sample_id: str, postprocess_status: str, passes_quality: bool) -> dict:
+            sample = deepcopy(read_json(ROOT / "schemas" / "autolabel_sample.example.json"))
+            sample["sample_id"] = sample_id
+            sample["image_asset"]["source_type"] = "generated"
+            sample["objects"][0]["geometry_detail"]["generation_params"] = {
+                "localizer": {
+                    "postprocess_status": postprocess_status,
+                    "used": "pgcd_lpips",
+                    "fallback_used": False,
+                    "quality": {
+                        "passes_quality": passes_quality,
+                        "quality_reason": None if passes_quality else "prompt_alignment_low",
+                    },
+                    "debug_artifacts": {"heatmap": "metadata/debug/heatmap.png"},
+                    "metrics": {"pgcd_component_score": 0.7},
+                }
+            }
+            return sample
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata_dir = root / "metadata"
+            write_json(metadata_dir / "good.json", generated_sample("sample_good", "success", True))
+            write_json(metadata_dir / "bad.json", generated_sample("sample_bad", "quality_failed", False))
+            direct_sample = read_json(ROOT / "schemas" / "autolabel_sample.example.json")
+            direct_sample["sample_id"] = "sample_direct"
+            write_json(metadata_dir / "direct.json", direct_sample)
+
+            output_path = root / "export" / "import.json"
+            rejected_path = root / "export" / "rejected.json"
+            tasks = export_metadata_dir(
+                metadata_dir,
+                output_path,
+                generated_quality_gate=True,
+                rejected_report_path=rejected_path,
+            )
+
+            self.assertEqual({task["data"]["sample_id"] for task in tasks}, {"sample_good", "sample_direct"})
+            report = read_json(rejected_path)
+            self.assertEqual(report["generated_samples"], 2)
+            self.assertEqual(report["exported_generated_samples"], 1)
+            self.assertEqual(report["rejected_samples"], 1)
+            self.assertEqual(report["rejections"][0]["sample_id"], "sample_bad")
+            self.assertIn("quality_", report["rejections"][0]["object_rejections"][0]["reason"])
+
     def test_yaml_model_selection_is_resolved_from_config(self) -> None:
         config = load_config(ROOT / "configs" / "autolabel.yaml")
         generation = resolve_generation_runtime(config)
@@ -224,25 +272,42 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(review_config["drop_failed"])
         self.assertFalse(review_config["drop_incomplete_person"])
 
-    def test_generation_runtime_includes_localizer_cli_passthrough(self) -> None:
+    def test_seedream5_generation_profile_is_resolved_from_config(self) -> None:
+        config = load_config(ROOT / "configs" / "autolabel.yaml")
+        self.assertIn("seedream5_image_editor", config["models"]["generation"]["image_generators"])
+
+        config["generation"]["image_model_key"] = "seedream5_image_editor"
+        generation = resolve_generation_runtime(config)
+
+        self.assertEqual(generation["image_model_name"], "doubao-seedream-5.0-lite")
+        self.assertEqual(generation["image_profile"]["api_key_env"], "ARK_API_KEY")
+        self.assertEqual(
+            generation["image_profile"]["endpoint"],
+            "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations",
+        )
+
+    def test_generation_runtime_keeps_localizer_cli_args_separate(self) -> None:
         config = load_config(ROOT / "configs" / "autolabel.yaml")
         generation = resolve_generation_runtime(config)
-        extra_cli_args = generation["extra_cli_args"]
+        localizer_cli_args = generation["localizer_cli_args"]
 
-        self.assertIn("--localizer", extra_cli_args)
-        self.assertIn("pgcd_lpips", extra_cli_args)
-        self.assertIn("--localizer-fallback", extra_cli_args)
-        self.assertIn("rgb_diff", extra_cli_args)
-        self.assertIn("--pgcd-threshold", extra_cli_args)
-        self.assertIn("--pgcd-min-component-area", extra_cli_args)
-        self.assertIn("--pgcd-max-global-change-ratio", extra_cli_args)
-        self.assertIn("--sam2-model", extra_cli_args)
+        self.assertEqual(generation["extra_cli_args"], [])
+        self.assertIn("--localizer", localizer_cli_args)
+        self.assertIn("pgcd_lpips", localizer_cli_args)
+        self.assertIn("--localizer-fallback", localizer_cli_args)
+        self.assertIn("rgb_diff", localizer_cli_args)
+        self.assertIn("--pgcd-threshold", localizer_cli_args)
+        self.assertIn("--pgcd-min-component-area", localizer_cli_args)
+        self.assertIn("--pgcd-max-global-change-ratio", localizer_cli_args)
+        self.assertIn("--sam2-model", localizer_cli_args)
 
     def test_config_includes_localizer_policy_examples(self) -> None:
         config = load_config(ROOT / "configs" / "autolabel.yaml")
         generation_module = config["modules"]["generation"]
 
         self.assertEqual(generation_module["backend"], "vlm_wan_autolabel")
+        self.assertEqual(generation_module["backends"]["vlm_wan_autolabel"]["project_dir"], "external/I2I")
+        self.assertFalse(generation_module["backends"]["vlm_wan_autolabel"]["pass_localizer_cli_args"])
         self.assertEqual(generation_module["localizer_policy"]["water_leak"]["primary"], "pgcd_lpips")
         self.assertEqual(generation_module["localizer_policy"]["coolant_leak"]["primary"], "pgcd_lpips")
         self.assertEqual(generation_module["localizer_policy"]["diesel_leak"]["primary"], "rgb_diff")
@@ -286,14 +351,15 @@ class ContractTests(unittest.TestCase):
         }
 
         runtime = resolve_generation_runtime(config, anomaly_type="oil_leak")
-        self.assertIn("--localizer", runtime["extra_cli_args"])
-        localizer_index = runtime["extra_cli_args"].index("--localizer")
-        self.assertEqual(runtime["extra_cli_args"][localizer_index + 1], "rgb_diff")
-        self.assertIn("--localizer-fallback", runtime["extra_cli_args"])
-        fallback_index = runtime["extra_cli_args"].index("--localizer-fallback")
-        self.assertEqual(runtime["extra_cli_args"][fallback_index + 1], "none")
+        self.assertEqual(runtime["extra_cli_args"], [])
+        self.assertIn("--localizer", runtime["localizer_cli_args"])
+        localizer_index = runtime["localizer_cli_args"].index("--localizer")
+        self.assertEqual(runtime["localizer_cli_args"][localizer_index + 1], "rgb_diff")
+        self.assertIn("--localizer-fallback", runtime["localizer_cli_args"])
+        fallback_index = runtime["localizer_cli_args"].index("--localizer-fallback")
+        self.assertEqual(runtime["localizer_cli_args"][fallback_index + 1], "none")
 
-    def test_generation_module_groups_rows_by_localizer_policy(self) -> None:
+    def test_generation_module_does_not_pass_localizer_cli_args_by_default(self) -> None:
         from autolabel.modules.generation.i2i_external import ExternalI2IGenerationModule
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -342,6 +408,107 @@ class ContractTests(unittest.TestCase):
 
             with patch("autolabel.modules.generation.i2i_external.I2IGenerator.run", new=fake_run):
                 result = ExternalI2IGenerationModule(config, {}).run(
+                    tasks_csv=manifest_path,
+                    image_root=root,
+                    output_root=root / "out",
+                )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]["extra_cli_args"], [])
+
+    def test_generation_module_passes_seedream_model_to_i2i(self) -> None:
+        from autolabel.modules.generation.i2i_external import ExternalI2IGenerationModule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_water",
+                        "image_id": "image_water",
+                        "image_uri": str(root / "water.jpg"),
+                        "anomaly_type": "water_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "anomaly_type", "source_type", "task_mode"],
+            )
+            config = load_config(ROOT / "configs" / "autolabel.yaml")
+            config["generation"]["image_model_key"] = "seedream5_image_editor"
+            calls = []
+
+            class FakeCompleted:
+                returncode = 0
+                stdout = "ok\n"
+                stderr = ""
+
+            def fake_run(self, **kwargs):
+                calls.append(kwargs)
+                return FakeCompleted()
+
+            with patch("autolabel.modules.generation.i2i_external.I2IGenerator.run", new=fake_run):
+                result = ExternalI2IGenerationModule(config, {}).run(
+                    tasks_csv=manifest_path,
+                    image_root=root,
+                    output_root=root / "out",
+                )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(calls[0]["image_model"], "doubao-seedream-5.0-lite")
+
+    def test_generation_module_can_opt_in_to_localizer_cli_passthrough(self) -> None:
+        from autolabel.modules.generation.i2i_external import ExternalI2IGenerationModule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_water",
+                        "image_id": "image_water",
+                        "image_uri": str(root / "water.jpg"),
+                        "anomaly_type": "water_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    },
+                    {
+                        "sample_id": "sample_oil",
+                        "image_id": "image_oil",
+                        "image_uri": str(root / "oil.jpg"),
+                        "anomaly_type": "oil_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    },
+                ],
+                ["sample_id", "image_id", "image_uri", "anomaly_type", "source_type", "task_mode"],
+            )
+            config = load_config(ROOT / "configs" / "autolabel.yaml")
+            config["modules"]["generation"]["localizer_policy"] = {
+                "oil_leak": {
+                    "primary": "rgb_diff",
+                    "fallback": "none",
+                }
+            }
+
+            calls = []
+
+            class FakeCompleted:
+                returncode = 0
+                stdout = "ok\n"
+                stderr = ""
+
+            def fake_run(self, **kwargs):
+                calls.append(kwargs)
+                return FakeCompleted()
+
+            with patch("autolabel.modules.generation.i2i_external.I2IGenerator.run", new=fake_run):
+                result = ExternalI2IGenerationModule(config, {"pass_localizer_cli_args": True}).run(
                     tasks_csv=manifest_path,
                     image_root=root,
                     output_root=root / "out",
@@ -701,6 +868,87 @@ class ContractTests(unittest.TestCase):
             }
             code = run_generation_branch(config, tasks_csv=manifest_path, output_root=root / "i2i")
             self.assertEqual(code, 0)
+
+    def test_prepare_water_leak_manifest_writes_generation_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_path = root / "manifest.csv"
+            output_path = root / "water_leak_generation_2.csv"
+            write_csv(
+                input_path,
+                [
+                    {
+                        "sample_id": "sample_a",
+                        "image_id": "image_a",
+                        "image_uri": "a.jpg",
+                        "source_type": "manual_upload",
+                        "task_mode": "direct",
+                        "width": "100",
+                        "height": "80",
+                    },
+                    {
+                        "sample_id": "sample_b",
+                        "image_id": "image_b",
+                        "image_uri": "b.jpg",
+                        "source_type": "manual_upload",
+                        "task_mode": "direct",
+                        "width": "120",
+                        "height": "90",
+                    },
+                ],
+                ["sample_id", "image_id", "image_uri", "source_type", "task_mode", "width", "height"],
+            )
+
+            write_water_leak_generation_manifest(input_path, output_path, count=2)
+            rows = read_csv(output_path)
+
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(rows[0]["sample_id"].startswith("water_leak_0001_"))
+            self.assertEqual({row["task_mode"] for row in rows}, {"generation"})
+            self.assertEqual({row["anomaly_type"] for row in rows}, {"water_leak"})
+            self.assertEqual({row["object_type"] for row in rows}, {"leakage_area"})
+
+    def test_generation_preflight_validates_water_leak_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "water.jpg"
+            image_path.write_bytes(b"placeholder")
+            i2i_entrypoint = root / "I2I" / "src" / "main.py"
+            i2i_entrypoint.parent.mkdir(parents=True)
+            i2i_entrypoint.write_text("print('ok')\n", encoding="utf-8")
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_water",
+                        "image_id": "image_water",
+                        "image_uri": str(image_path),
+                        "anomaly_type": "water_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "anomaly_type", "source_type", "task_mode"],
+            )
+            config = load_config(ROOT / "configs" / "autolabel.yaml")
+            config["generation"]["image_model_key"] = "seedream5_image_editor"
+            config["modules"]["generation"]["backends"]["vlm_wan_autolabel"]["project_dir"] = str(root / "I2I")
+
+            report = run_generation_preflight(
+                config,
+                tasks_csv=manifest_path,
+                image_root=root,
+                output_root=root / "run" / "i2i_outputs",
+                require_credentials=False,
+            )
+
+            self.assertFalse(report["skipped"])
+            self.assertEqual(report["generation_rows"], 1)
+            self.assertEqual(
+                report["runtime_by_anomaly"]["water_leak"]["image_model_name"],
+                "doubao-seedream-5.0-lite",
+            )
 
     def test_labelstudio_percent_box_converts_to_xyxy_pixels(self) -> None:
         box = percent_box_to_xyxy({"x": 10.0, "y": 20.0, "width": 30.0, "height": 40.0}, 1000, 500)
