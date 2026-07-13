@@ -460,6 +460,53 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertEqual(calls[0]["image_model"], "doubao-seedream-5.0-lite")
 
+    def test_generation_module_normalizes_water_leak_for_external_backend_alias(self) -> None:
+        from autolabel.modules.generation.i2i_external import ExternalI2IGenerationModule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_water",
+                        "image_id": "image_water",
+                        "image_uri": str(root / "water.jpg"),
+                        "anomaly_type": "water_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "anomaly_type", "source_type", "task_mode"],
+            )
+            config = load_config(ROOT / "configs" / "autolabel.yaml")
+            calls = []
+
+            class FakeCompleted:
+                returncode = 0
+                stdout = "ok\n"
+                stderr = ""
+
+            def fake_run(self, **kwargs):
+                calls.append(kwargs)
+                return FakeCompleted()
+
+            with patch("autolabel.modules.generation.i2i_external.I2IGenerator.run", new=fake_run):
+                result = ExternalI2IGenerationModule(
+                    config,
+                    {"anomaly_type_aliases": {"water_leak": "coolant_leak"}},
+                ).run(
+                    tasks_csv=manifest_path,
+                    image_root=root,
+                    output_root=root / "out",
+                )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("water_leak->coolant_leak", result.stdout)
+            prepared_rows = read_csv(calls[0]["tasks_csv"])
+            self.assertEqual(prepared_rows[0]["anomaly_type"], "coolant_leak")
+
     def test_generation_module_can_opt_in_to_localizer_cli_passthrough(self) -> None:
         from autolabel.modules.generation.i2i_external import ExternalI2IGenerationModule
 

@@ -26,6 +26,8 @@ I2I_TASK_FIELDS = [
     "capture_time",
 ]
 
+DEFAULT_ANOMALY_TYPE_ALIASES: dict[str, str] = {}
+
 
 class ExternalI2IGenerationModule:
     """Generation module backed by the existing I2I project.
@@ -42,9 +44,39 @@ class ExternalI2IGenerationModule:
     def filtered_generation_rows(self, tasks_csv: str | Path) -> list[dict[str, Any]]:
         return filter_generation_rows(str(tasks_csv))
 
+    def anomaly_type_aliases(self) -> dict[str, str]:
+        configured = self.module_config.get("anomaly_type_aliases")
+        if not isinstance(configured, dict):
+            return dict(DEFAULT_ANOMALY_TYPE_ALIASES)
+        aliases = dict(DEFAULT_ANOMALY_TYPE_ALIASES)
+        aliases.update(
+            {
+                str(source).strip(): str(target).strip()
+                for source, target in configured.items()
+                if str(source).strip() and str(target).strip()
+            }
+        )
+        return aliases
+
+    def normalize_rows_for_backend(self, rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        aliases = self.anomaly_type_aliases()
+        normalized_rows: list[dict[str, Any]] = []
+        remapped: dict[str, str] = {}
+        for row in rows:
+            normalized = dict(row)
+            anomaly_type = str(normalized.get("anomaly_type") or "").strip()
+            backend_anomaly_type = aliases.get(anomaly_type, anomaly_type)
+            if backend_anomaly_type:
+                normalized["anomaly_type"] = backend_anomaly_type
+            if backend_anomaly_type and backend_anomaly_type != anomaly_type:
+                remapped[anomaly_type] = backend_anomaly_type
+            normalized_rows.append(normalized)
+        return normalized_rows, remapped
+
     def prepare_tasks(self, rows: list[dict[str, Any]], output_path: str | Path) -> Path | None:
         if not rows:
             return None
+        rows, _ = self.normalize_rows_for_backend(rows)
         target = Path(output_path)
         write_csv(target, rows, I2I_TASK_FIELDS)
         return target
@@ -90,6 +122,10 @@ class ExternalI2IGenerationModule:
         combined_stdout: list[str] = []
         combined_stderr: list[str] = []
         for group_name, group_rows in self.build_runtime_groups(rows):
+            _, remapped = self.normalize_rows_for_backend(group_rows)
+            if remapped:
+                aliases = ", ".join(f"{source}->{target}" for source, target in sorted(remapped.items()))
+                combined_stdout.append(f"Normalized backend anomaly types: {aliases}\n")
             filtered_tasks = self.prepare_tasks(
                 group_rows,
                 Path(output_root) / f"generation_tasks.{slugify(group_name)}.csv",
