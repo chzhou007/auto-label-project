@@ -21,7 +21,7 @@
   │    └─ 调用 classification.py 做多标签分类
   │
   └─ 图像生成任务
-       ├─ 调用 C:\Users\chang\Documents\数据标注\I2I
+       ├─ 调用 external/I2I
        ├─ 接收生成图自带框坐标
        └─ 使用生成任务自带分类信息，跳过 classification.py
         ↓
@@ -110,7 +110,8 @@ $env:QWEN_GEOMETRY_MODEL="qwen3.6-27b"
 $env:QWEN_GRID_SELECTOR_MODEL="qwen3.6-27b"
 
 # 只有运行 I2I 生成分支时才需要配置生成模型 key：
-$env:DASHSCOPE_API_KEY="你的 DashScope Key"
+$env:ARK_API_KEY="你的 Ark/Seedream Key"
+$env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
 ```
 
 如需本地私有配置，可以复制：
@@ -421,7 +422,7 @@ sample_002,img_002,data/staging/image_sequence/img_002.jpg,generated,generation,
 图像生成分支使用外部代码：
 
 ```text
-C:\Users\chang\Documents\数据标注\I2I
+external/I2I
 ```
 
 运行命令：
@@ -994,7 +995,7 @@ Recommended entrypoints:
 
 Before running this version, make sure:
 
-1. The external I2I repo is available at `${I2I_PROJECT_DIR}` or at the relative default `external/I2I`.
+1. The bundled I2I backend is available at `external/I2I`. Set `${I2I_PROJECT_DIR}` only when you intentionally want to use another checkout.
 2. Your manifest rows for generation include `task_mode=generation` and `anomaly_type`.
 3. The required model credentials are set in environment variables or config.
 4. Dependencies are installed:
@@ -1003,10 +1004,10 @@ Before running this version, make sure:
 python -m pip install -r requirements.txt
 ```
 
-On Windows, if you keep I2I outside this repository:
+On Windows, if you intentionally keep I2I outside this repository:
 
 ```powershell
-$env:I2I_PROJECT_DIR="C:\Users\chang\Documents\数据标注\I2I"
+$env:I2I_PROJECT_DIR="C:\path\to\I2I"
 ```
 
 The localizer configuration is applied during metadata ingest in this repository. It is not passed to the external I2I CLI unless `modules.generation.backends.<backend>.pass_localizer_cli_args: true` is set for a newer compatible I2I entrypoint.
@@ -1110,7 +1111,6 @@ python -m autolabel.modules.generation.main `
 Seedream5.0 water leak calibration and production:
 
 ```powershell
-$env:I2I_PROJECT_DIR="C:\path\to\I2I"
 $env:ARK_API_KEY="..."
 $env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
 $env:SEEDREAM_IMAGE_MODEL="doubao-seedream-5.0-lite"
@@ -1158,8 +1158,8 @@ Important external I2I compatibility note:
 
 - This repository now resolves and passes both selected model names into the external I2I process as `--vlm-model` and `--image-model`.
 - It also passes each selected model profile's env values into the subprocess.
-- The stock external I2I still instantiates its legacy `QwenVLMClient` and `WanImageClient` classes. In that version, `DashScopeConfig` reads `DASHSCOPE_API_KEY`, `DASHSCOPE_VLM_ENDPOINT`, and `DASHSCOPE_WAN_ENDPOINT`, with one shared API key for both stages.
-- Therefore, true mixed-provider runs such as Qwen/DashScope for grid selection plus Ark Seedream for image editing require the external I2I config/client layer to be provider-aware and to read the Seedream envs above. Without that I2I-side update, the repo CLI will show the intended model chain in preflight, but the legacy I2I client may still call its DashScope endpoints.
+- Use the synced provider-aware external I2I version. Its VLM stage reads `QWEN397B_API_KEY` / `QWEN397B_API_URL`, and its image stage reads `ARK_API_KEY` / `SEEDREAM_BASE_URL`.
+- If you point `I2I_PROJECT_DIR` at an older external I2I checkout, the repo CLI may show the intended model chain in preflight while the old I2I client still calls DashScope endpoints.
 
 For current production runs, read the preflight line before spending API quota. It prints the effective model chain as:
 
