@@ -13,6 +13,47 @@ class GenerationPreflightError(RuntimeError):
     pass
 
 
+REFERENCE_GENERATION_ERROR = (
+    "Seedream image profile points to a reference-generation endpoint "
+    "(/images/generations), which is not a production local edit/inpaint API. "
+    "Configure a real Seedream local edit endpoint/parameters, or set "
+    "SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG=1 only for debug experiments."
+)
+
+
+def _truthy_env(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_seedream_reference_generation_endpoint(endpoint: str | None) -> bool:
+    if not endpoint:
+        return False
+    normalized = str(endpoint).lower().rstrip("/")
+    return normalized.endswith("/images/generations") or "/images/generations" in normalized
+
+
+def _profile_endpoint(runtime: dict[str, Any]) -> str | None:
+    image_profile = runtime.get("image_profile", {}) if isinstance(runtime.get("image_profile"), dict) else {}
+    endpoint = image_profile.get("endpoint")
+    endpoint_env = image_profile.get("endpoint_env")
+    runtime_env = runtime.get("env", {}) if isinstance(runtime.get("env"), dict) else {}
+    if endpoint_env and runtime_env.get(str(endpoint_env)):
+        return str(runtime_env[str(endpoint_env)])
+    return str(endpoint) if endpoint else None
+
+
+def _validate_seedream_profile(runtime: dict[str, Any], require_credentials: bool) -> None:
+    if not require_credentials:
+        return
+    image_profile = runtime.get("image_profile", {}) if isinstance(runtime.get("image_profile"), dict) else {}
+    provider = str(image_profile.get("provider") or "").lower()
+    model_name = str(runtime.get("image_model_name") or image_profile.get("model_name") or "").lower()
+    endpoint = _profile_endpoint(runtime)
+    is_seedream = provider in {"volcengine_ark", "ark", "seedream"} or "seedream" in model_name
+    if is_seedream and _is_seedream_reference_generation_endpoint(endpoint) and not _truthy_env("SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG"):
+        raise GenerationPreflightError(REFERENCE_GENERATION_ERROR)
+
+
 def _resolve_existing_image_path(image_uri: str, image_root: str | Path) -> Path | None:
     candidates = [
         resolve_path(image_uri),
@@ -119,6 +160,7 @@ def run_generation_preflight(
     credential_checks: list[dict[str, Any]] = []
     for anomaly_type in anomaly_types:
         runtime = resolve_generation_runtime(config, anomaly_type=anomaly_type)
+        _validate_seedream_profile(runtime, require_credentials=require_credentials)
         runtime_by_anomaly[anomaly_type] = {
             "vlm_model_name": runtime.get("vlm_model_name"),
             "image_model_name": runtime.get("image_model_name"),

@@ -40,11 +40,14 @@ def ensure_output_dirs(output_root: str | Path) -> dict[str, Path]:
     dirs = {
         "root": root,
         "generated_images": root / "generated_images",
-        "grid_previews": root / "grid_previews",
-        "crops": root / "crops",
-        "masks": root / "masks",
+        "debug": root / "debug",
+        "grid_previews": root / "debug" / "grid_previews",
+        "crops": root / "debug" / "crops",
+        "masks": root / "debug" / "masks",
         "metadata": root / "metadata",
         "logs": root / "logs",
+        "requests": root / "logs" / "requests",
+        "responses": root / "logs" / "responses",
     }
     for path in dirs.values():
         path.mkdir(parents=True, exist_ok=True)

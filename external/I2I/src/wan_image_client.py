@@ -21,6 +21,10 @@ from utils import cv2_imread, cv2_imwrite, image_to_data_url, redact_headers, wr
 logger = logging.getLogger(__name__)
 
 DEFAULT_SEEDREAM_MIN_PIXELS = 3_686_400
+REFERENCE_GENERATION_ERROR = (
+    "Seedream endpoint appears to be reference-generation-only and is not allowed for production local editing. "
+    "Configure a real Seedream local edit/inpaint endpoint or set SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG=1 for debug-only experiments."
+)
 
 
 def _save_base64_image(data: str, output_path: str) -> None:
@@ -115,6 +119,27 @@ def _paste_generated_crop(
     composed.save(output_path)
 
 
+def _looks_like_framed_scene(image_path: str | Path) -> bool:
+    with Image.open(image_path) as image:
+        rgb = image.convert("RGB")
+        width, height = rgb.size
+        if width < 32 or height < 32:
+            return False
+        border = max(4, min(width, height) // 40)
+        gray = np.asarray(rgb.convert("L"), dtype=np.uint8)
+    border_mask = np.zeros((height, width), dtype=bool)
+    border_mask[:border, :] = True
+    border_mask[-border:, :] = True
+    border_mask[:, :border] = True
+    border_mask[:, -border:] = True
+    inner = gray[border : height - border, border : width - border]
+    if inner.size == 0:
+        return False
+    border_dark_ratio = float((gray[border_mask] < 28).mean())
+    inner_dark_ratio = float((inner < 28).mean())
+    return border_dark_ratio >= 0.65 and inner_dark_ratio <= 0.35
+
+
 def _dry_run_edit(image_path: str, bbox: tuple[int, int, int, int], anomaly_type: str, output_path: str) -> None:
     image = cv2_imread(image_path, cv2.IMREAD_COLOR)
     if image is None:
@@ -163,6 +188,26 @@ def _is_seedream_provider(config: ModelServiceConfig | DashScopeConfig, endpoint
         return True
     marker = f"{endpoint} {model}".lower()
     return "seedream" in marker or "ark.cn-beijing.volces.com" in marker or "/images/generations" in marker
+
+
+def _truthy_env(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_seedream_reference_generation_endpoint(endpoint: str) -> bool:
+    normalized = endpoint.lower().rstrip("/")
+    return normalized.endswith("/images/generations") or "/images/generations" in normalized
+
+
+def _allow_seedream_reference_generation_debug() -> bool:
+    return _truthy_env("SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG")
+
+
+def validate_seedream_local_edit_capability(endpoint: str, *, dry_run: bool = False) -> None:
+    if dry_run:
+        return
+    if _is_seedream_reference_generation_endpoint(endpoint) and not _allow_seedream_reference_generation_debug():
+        raise RuntimeError(REFERENCE_GENERATION_ERROR)
 
 
 def _seedream_prompt(prompt: str, bbox: tuple[int, int, int, int]) -> str:
@@ -263,7 +308,7 @@ class WanImageClient:
             request_payload: dict[str, Any] = {
                 "model": self.model,
                 "prompt": seedream_prompt,
-                "n": int(os.getenv("SEEDREAM_N", "1")),
+                "n": 1,
                 "watermark": False,
             }
             response_format = os.getenv("SEEDREAM_RESPONSE_FORMAT")
@@ -336,6 +381,8 @@ class WanImageClient:
     ) -> dict[str, Any]:
         endpoint = _service_endpoint(self.config)
         is_seedream = _is_seedream_provider(self.config, endpoint, self.model)
+        self.model_call_count = getattr(self, "model_call_count", 0)
+        self.model_generated_count = getattr(self, "model_generated_count", 0)
         request_payload: dict[str, Any]
         request_log_payload: dict[str, Any]
         if not (is_seedream and not self.dry_run):
@@ -360,6 +407,9 @@ class WanImageClient:
 
         if not self.config.api_key:
             raise RuntimeError("image generation API key is required unless --dry-run is used; set ARK_API_KEY")
+
+        if is_seedream:
+            validate_seedream_local_edit_capability(endpoint, dry_run=self.dry_run)
 
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
@@ -400,6 +450,7 @@ class WanImageClient:
                 },
             )
         try:
+            self.model_call_count += 1
             response = requests.post(endpoint, headers=headers, json=request_payload, timeout=180)
             raw: dict[str, Any]
             try:
@@ -417,9 +468,12 @@ class WanImageClient:
             if compose_seedream_crop:
                 download_target = str(Path(temp_dir_obj.name) / "seedream_generated_crop.png")  # type: ignore[union-attr]
             _download_or_decode_image(image_value, download_target)
+            self.model_generated_count += 1
             if compose_seedream_crop:
                 if seedream_crop_bbox is None:
                     raise RuntimeError("missing Seedream crop bbox for local composition")
+                if _looks_like_framed_scene(download_target):
+                    raise RuntimeError("Seedream generated crop appears to contain a framed full-scene image; rejecting debug reference-generation output")
                 _paste_generated_crop(image_path, download_target, output_path, seedream_crop_bbox)
                 final_response.setdefault("local_edit", {})
                 final_response["local_edit"].update(

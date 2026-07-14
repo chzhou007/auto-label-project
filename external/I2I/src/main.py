@@ -118,6 +118,12 @@ def _is_refined_final_bbox(final_box: dict, expanded_bbox: tuple[int, int, int, 
     return final_box != expanded_box and _bbox_iou(final_box, expanded_bbox) < 0.95
 
 
+def _count_files(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(1 for item in path.rglob("*") if item.is_file())
+
+
 def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: QwenVLMClient, wan: WanImageClient) -> bool:
     sample_id = task["sample_id"]
     stale_metadata = dirs["metadata"] / f"{sample_id}.json"
@@ -172,8 +178,8 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
             bbox=expanded_bbox,
             output_path=str(generated_path),
             anomaly_type=task["anomaly_type"],
-            request_log_path=str(dirs["logs"] / f"{sample_id}_wan_request.json"),
-            response_log_path=str(dirs["logs"] / f"{sample_id}_wan_response.json"),
+            request_log_path=str(dirs["requests"] / f"{sample_id}_wan_request.json"),
+            response_log_path=str(dirs["responses"] / f"{sample_id}_wan_response.json"),
         )
         gen_width, gen_height = image_size(generated_path)
         if (gen_width, gen_height) != (width, height):
@@ -282,18 +288,33 @@ def main() -> int:
     workers = max(1, cfg.workers)
     logger.info("processing %s tasks with workers=%s skipped_existing=%s", len(runnable_tasks), workers, skipped)
 
-    def run_one(task: dict) -> tuple[str, bool]:
+    def run_one(task: dict) -> tuple[str, bool, int, int]:
         vlm = QwenVLMClient(cfg.vlm_model, services.vlm, dry_run=cfg.dry_run)
         wan = WanImageClient(cfg.image_model, services.image, dry_run=cfg.dry_run)
         try:
-            return task.get("sample_id", "unknown"), process_task(task, cfg, dirs, vlm, wan)
+            success = process_task(task, cfg, dirs, vlm, wan)
+            return (
+                task.get("sample_id", "unknown"),
+                success,
+                int(getattr(wan, "model_call_count", 0)),
+                int(getattr(wan, "model_generated_count", 0)),
+            )
         except (ValidationError, Exception) as exc:
             _write_failure(dirs["logs"], task.get("sample_id", "unknown"), "task", exc, {"task": task})
-            return task.get("sample_id", "unknown"), False
+            return (
+                task.get("sample_id", "unknown"),
+                False,
+                int(getattr(wan, "model_call_count", 0)),
+                int(getattr(wan, "model_generated_count", 0)),
+            )
 
+    model_call_count = 0
+    model_generated_count = 0
     if workers == 1:
         for task in runnable_tasks:
-            _, success = run_one(task)
+            _, success, calls, generated = run_one(task)
+            model_call_count += calls
+            model_generated_count += generated
             if success:
                 ok += 1
             else:
@@ -303,7 +324,9 @@ def main() -> int:
             futures = [executor.submit(run_one, task) for task in runnable_tasks]
             completed = 0
             for future in as_completed(futures):
-                sample_id, success = future.result()
+                sample_id, success, calls, generated = future.result()
+                model_call_count += calls
+                model_generated_count += generated
                 completed += 1
                 if success:
                     ok += 1
@@ -319,7 +342,19 @@ def main() -> int:
                     sample_id,
                 )
 
-    summary = {"total": len(tasks), "processed": len(runnable_tasks), "succeeded": ok, "failed": failed, "skipped": skipped}
+    final_generated_count = _count_files(dirs["generated_images"])
+    debug_artifact_count = _count_files(dirs["debug"])
+    summary = {
+        "total": len(tasks),
+        "processed": len(runnable_tasks),
+        "succeeded": ok,
+        "failed": failed,
+        "skipped": skipped,
+        "model_call_count": model_call_count,
+        "model_generated_count": model_generated_count,
+        "final_generated_count": final_generated_count,
+        "debug_artifact_count": debug_artifact_count,
+    }
     write_json(dirs["logs"] / "run_summary.json", summary)
     logger.info("run summary: %s", summary)
     return 0 if failed == 0 else 1

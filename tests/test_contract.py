@@ -491,7 +491,7 @@ class ContractTests(unittest.TestCase):
             )
 
             with (
-                patch.dict("os.environ", {"SEEDREAM_SIZE": "auto"}),
+                patch.dict("os.environ", {"SEEDREAM_SIZE": "auto", "SEEDREAM_N": "4", "SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG": "1"}),
                 patch("wan_image_client.requests.post", return_value=FakeResponse()),
                 patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
             ):
@@ -520,9 +520,101 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(body["source_edit_bbox"], [20, 10, 60, 50])
             self.assertEqual(body["edit_bbox"], [0, 0, 40, 40])
             self.assertEqual(body["size"], "1920x1920")
+            self.assertEqual(body["n"], 1)
             self.assertTrue(body["image_urls"][0].endswith("seedream_input_crop.jpg"))
             response_log = read_json(response_log_path)
             self.assertEqual(response_log["local_edit"]["mode"], "crop_then_paste")
+
+    def test_seedream_reference_endpoint_is_rejected_for_production_local_edit(self) -> None:
+        from PIL import Image
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from config import ModelServiceConfig
+            from wan_image_client import WanImageClient
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original_path = root / "original.jpg"
+            Image.new("RGB", (100, 80), (70, 80, 90)).save(original_path)
+            client = WanImageClient(
+                "doubao-seedream-5.0-lite",
+                ModelServiceConfig(
+                    api_key="test-key",
+                    provider="volcengine_ark",
+                    endpoint="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations",
+                    api_key_env="ARK_API_KEY",
+                    endpoint_env="SEEDREAM_BASE_URL",
+                ),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "reference-generation-only"):
+                client.edit_image_with_wan(
+                    image_path=str(original_path),
+                    prompt="make a small water leak",
+                    negative_prompt="",
+                    bbox=(20, 10, 60, 50),
+                    output_path=str(root / "generated.png"),
+                    anomaly_type="water_leak",
+                )
+
+    def test_seedream_debug_reference_generation_rejects_framed_scene_crop(self) -> None:
+        from PIL import Image, ImageDraw
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from config import ModelServiceConfig
+            from wan_image_client import WanImageClient
+        finally:
+            sys.path.remove(str(src_dir))
+
+        class FakeResponse:
+            ok = True
+            status_code = 200
+
+            def json(self):
+                return {"data": [{"url": "https://example.invalid/generated.png"}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original_path = root / "original.jpg"
+            Image.new("RGB", (120, 90), (70, 80, 90)).save(original_path)
+
+            def fake_download(_value, target):
+                image = Image.new("RGB", (320, 240), (160, 170, 180))
+                draw = ImageDraw.Draw(image)
+                draw.rectangle((0, 0, 319, 239), outline=(0, 0, 0), width=20)
+                image.save(target)
+
+            client = WanImageClient(
+                "doubao-seedream-5.0-lite",
+                ModelServiceConfig(
+                    api_key="test-key",
+                    provider="volcengine_ark",
+                    endpoint="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations",
+                    api_key_env="ARK_API_KEY",
+                    endpoint_env="SEEDREAM_BASE_URL",
+                ),
+            )
+
+            with (
+                patch.dict("os.environ", {"SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG": "1"}),
+                patch("wan_image_client.requests.post", return_value=FakeResponse()),
+                patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "framed full-scene"):
+                    client.edit_image_with_wan(
+                        image_path=str(original_path),
+                        prompt="make a small water leak",
+                        negative_prompt="",
+                        bbox=(20, 10, 80, 60),
+                        output_path=str(root / "generated.png"),
+                        anomaly_type="water_leak",
+                    )
 
     def test_seedream_default_size_scales_crop_aspect_to_min_pixels(self) -> None:
         from PIL import Image
@@ -578,7 +670,7 @@ class ContractTests(unittest.TestCase):
                 Image.new("RGB", (256, 256), (220, 235, 245)).save(target)
 
             with (
-                patch.dict("os.environ", {"SEEDREAM_SIZE": "2k"}),
+                patch.dict("os.environ", {"SEEDREAM_SIZE": "2k", "SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG": "1"}),
                 patch("wan_image_client.requests.post", return_value=FakeResponse()),
                 patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
             ):
@@ -621,7 +713,7 @@ class ContractTests(unittest.TestCase):
                 ),
             )
 
-            with patch.dict("os.environ", {"SEEDREAM_SIZE": "bad-size"}):
+            with patch.dict("os.environ", {"SEEDREAM_SIZE": "bad-size", "SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG": "1"}):
                 with self.assertRaisesRegex(ValueError, "SEEDREAM_SIZE"):
                     client.edit_image_with_wan(
                         image_path=str(original_path),
@@ -631,6 +723,93 @@ class ContractTests(unittest.TestCase):
                         output_path=str(root / "generated.png"),
                         anomaly_type="water_leak",
                     )
+
+    def test_generation_preflight_rejects_seedream_reference_generation_endpoint(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_root = root / "images"
+            image_root.mkdir()
+            image_path = image_root / "source.jpg"
+            Image.new("RGB", (100, 80), (70, 80, 90)).save(image_path)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_water",
+                        "image_id": "source",
+                        "image_uri": image_path.name,
+                        "anomaly_type": "water_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "anomaly_type", "source_type", "task_mode"],
+            )
+
+            with patch.dict("os.environ", {"ARK_API_KEY": "ark-test", "QWEN397B_API_KEY": "qwen-test"}, clear=False):
+                config = load_config(ROOT / "configs" / "autolabel.yaml")
+                with self.assertRaisesRegex(Exception, "reference-generation endpoint"):
+                    run_generation_preflight(
+                        config,
+                        tasks_csv=manifest_path,
+                        image_root=image_root,
+                        output_root=root / "out",
+                    )
+
+    def test_i2i_dry_run_summary_separates_final_images_from_debug_artifacts(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_root = root / "images"
+            output_root = root / "out"
+            image_root.mkdir()
+            image_path = image_root / "source.jpg"
+            Image.new("RGB", (160, 120), (80, 80, 80)).save(image_path)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_dry_run",
+                        "image_id": "source",
+                        "image_uri": image_path.name,
+                        "anomaly_type": "water_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "anomaly_type", "source_type", "task_mode"],
+            )
+
+            cmd = [
+                sys.executable,
+                str(ROOT / "external" / "I2I" / "src" / "main.py"),
+                "--tasks",
+                str(manifest_path),
+                "--image-root",
+                str(image_root),
+                "--output-root",
+                str(output_root),
+                "--dry-run",
+                "--limit",
+                "1",
+            ]
+            completed = subprocess.run(cmd, cwd=ROOT / "external" / "I2I", text=True, capture_output=True, check=False)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = read_json(output_root / "logs" / "run_summary.json")
+            self.assertEqual(summary["final_generated_count"], 1)
+            self.assertEqual(summary["model_call_count"], 0)
+            self.assertEqual(summary["model_generated_count"], 0)
+            self.assertGreaterEqual(summary["debug_artifact_count"], 3)
+            self.assertEqual(len(list((output_root / "generated_images").glob("*.png"))), 1)
+            self.assertTrue((output_root / "debug" / "grid_previews").exists())
+            self.assertTrue((output_root / "debug" / "crops").exists())
+            self.assertTrue((output_root / "debug" / "masks").exists())
 
     def test_i2i_process_task_generates_once_for_selected_grid_only(self) -> None:
         from PIL import Image, ImageDraw
