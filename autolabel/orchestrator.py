@@ -103,6 +103,12 @@ def run_generation_branch(
                 f"models={';'.join(model_pairs)}, "
                 f"i2i_entrypoint={report.get('i2i_entrypoint')}"
             )
+            if report.get("i2i_project_dir_env"):
+                print(
+                    "Generation preflight warning: "
+                    f"I2I_PROJECT_DIR is set to {report.get('i2i_project_dir_env')}; "
+                    "unset it to use the bundled external/I2I backend."
+                )
     result = module.run(
         tasks_csv=tasks_csv,
         image_root=image_root,

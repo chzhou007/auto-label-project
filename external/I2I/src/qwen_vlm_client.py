@@ -82,11 +82,30 @@ def _is_openai_compatible(config: ModelServiceConfig | DashScopeConfig, endpoint
     return normalized.endswith("/v1") or normalized.endswith("/chat/completions")
 
 
-def _chat_completions_endpoint(endpoint: str) -> str:
+def _candidate_request_endpoints(endpoint: str) -> list[str]:
     normalized = endpoint.rstrip("/")
+    explicit = os.getenv("QWEN397B_CHAT_COMPLETIONS_URL")
+    candidates: list[str] = []
+    if explicit:
+        candidates.append(explicit.rstrip("/"))
     if normalized.endswith("/chat/completions"):
-        return normalized
-    return f"{normalized}/chat/completions"
+        candidates.append(normalized)
+    else:
+        candidates.extend([f"{normalized}/chat/completions", normalized])
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
+def _response_error_summary(raw: dict[str, Any]) -> str:
+    message = raw.get("error") or raw.get("message") or raw.get("text")
+    if isinstance(message, dict):
+        message = message.get("message") or message.get("code") or str(message)
+    if not isinstance(message, str):
+        message = str(raw) if raw else ""
+    return message[:500]
 
 
 def _use_response_format() -> bool:
@@ -136,10 +155,10 @@ class QwenVLMClient:
         self.config = dashscope_config
         self.dry_run = dry_run
 
-    def _build_request_payloads(self, grid_image_path: str, prompt: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    def _build_request_payloads(self, grid_image_path: str, prompt: str) -> tuple[list[str], dict[str, Any], dict[str, Any]]:
         endpoint = _service_endpoint(self.config)
         if _is_openai_compatible(self.config, endpoint):
-            request_endpoint = _chat_completions_endpoint(endpoint)
+            request_endpoints = _candidate_request_endpoints(endpoint)
             body: dict[str, Any] = {
                 "model": self.model,
                 "messages": [
@@ -168,7 +187,7 @@ class QwenVLMClient:
                     }
                 ],
             }
-            return request_endpoint, body, log_body
+            return request_endpoints, body, log_body
 
         body = {
             "model": self.model,
@@ -200,7 +219,7 @@ class QwenVLMClient:
             },
             "parameters": {"result_format": "message"},
         }
-        return endpoint, body, log_body
+        return [endpoint], body, log_body
 
     def select_grid_with_qwen(
         self,
@@ -229,32 +248,63 @@ class QwenVLMClient:
             raise RuntimeError("VLM API key is required unless --dry-run is used; set QWEN397B_API_KEY")
 
         prompt = build_vlm_prompt(anomaly_type)
-        endpoint, body, log_body = self._build_request_payloads(grid_image_path, prompt)
+        endpoints, body, log_body = self._build_request_payloads(grid_image_path, prompt)
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
-        request_log = {
-            "endpoint": endpoint,
+        request_log: dict[str, Any] = {
+            "endpoint": endpoints[0],
+            "endpoint_attempts": endpoints,
             "provider": self.config.provider,
             "headers": redact_headers(headers),
             "body": log_body,
         }
-        response = requests.post(endpoint, headers=headers, json=body, timeout=120)
-        raw: dict[str, Any]
-        try:
-            raw = response.json()
-        except Exception:
-            raw = {"status_code": response.status_code, "text": response.text}
-        if not response.ok:
+        raw: dict[str, Any] = {}
+        status_code = 0
+        used_endpoint = endpoints[0]
+        failed_attempts: list[dict[str, Any]] = []
+        for index, endpoint in enumerate(endpoints):
+            used_endpoint = endpoint
+            response = requests.post(endpoint, headers=headers, json=body, timeout=120)
+            status_code = response.status_code
+            try:
+                raw = response.json()
+            except Exception:
+                raw = {"status_code": response.status_code, "text": response.text}
+            if response.ok:
+                break
+            failed_attempts.append(
+                {
+                    "endpoint": endpoint,
+                    "status_code": status_code,
+                    "response_summary": _response_error_summary(raw),
+                }
+            )
+            if status_code == 404 and index + 1 < len(endpoints):
+                continue
             if log_path:
+                request_log["endpoint"] = used_endpoint
+                request_log["failed_attempts"] = failed_attempts
                 write_json(log_path, {"request": request_log, "response": raw})
-            raise RuntimeError(f"Qwen request failed: HTTP {response.status_code}")
+            raise RuntimeError(
+                "Qwen request failed: "
+                f"HTTP {status_code} endpoint={used_endpoint} response={_response_error_summary(raw)}"
+            )
+        else:
+            if log_path:
+                request_log["endpoint"] = used_endpoint
+                request_log["failed_attempts"] = failed_attempts
+                write_json(log_path, {"request": request_log, "response": raw})
+            raise RuntimeError(f"Qwen request failed: HTTP {status_code} endpoint={used_endpoint}")
 
         text = _extract_text_from_response(raw)
         parsed = validate_vlm_selection(_extract_json(text))
         parsed["raw_response"] = raw
         if log_path:
+            request_log["endpoint"] = used_endpoint
+            if failed_attempts:
+                request_log["failed_attempts"] = failed_attempts
             write_json(log_path, {"request": request_log, "parsed": parsed, "response": raw})
         return parsed
 

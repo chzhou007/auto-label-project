@@ -145,6 +145,7 @@ def run_generation_preflight(
         "anomaly_types": anomaly_types,
         "runtime_by_anomaly": runtime_by_anomaly,
         "i2i_entrypoint": str(entrypoint),
+        "i2i_project_dir_env": os.getenv("I2I_PROJECT_DIR"),
         "output_root": str(output_path),
         "credential_checks": credential_checks,
     }

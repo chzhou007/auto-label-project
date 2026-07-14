@@ -1010,6 +1010,12 @@ On Windows, if you intentionally keep I2I outside this repository:
 $env:I2I_PROJECT_DIR="C:\path\to\I2I"
 ```
 
+After migrating to the bundled backend, remove an old override before running:
+
+```powershell
+Remove-Item Env:I2I_PROJECT_DIR -ErrorAction SilentlyContinue
+```
+
 The localizer configuration is applied during metadata ingest in this repository. It is not passed to the external I2I CLI unless `modules.generation.backends.<backend>.pass_localizer_cli_args: true` is set for a newer compatible I2I entrypoint.
 
 ### 17.2 Recommended Production Command
