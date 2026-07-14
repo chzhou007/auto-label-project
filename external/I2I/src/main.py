@@ -113,12 +113,9 @@ def _bbox_iou(a: dict, b: tuple[int, int, int, int]) -> float:
     return inter / union if union else 0.0
 
 
-def _validate_final_bbox_is_refined(final_box: dict, expanded_bbox: tuple[int, int, int, int]) -> None:
+def _is_refined_final_bbox(final_box: dict, expanded_bbox: tuple[int, int, int, int]) -> bool:
     expanded_box = bbox_to_box_dict(expanded_bbox)
-    if final_box == expanded_box or _bbox_iou(final_box, expanded_bbox) >= 0.95:
-        raise ValueError(
-            "diff localization failed: final_bbox is identical or nearly identical to expanded_edit_bbox"
-        )
+    return final_box != expanded_box and _bbox_iou(final_box, expanded_bbox) < 0.95
 
 
 def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: QwenVLMClient, wan: WanImageClient) -> bool:
@@ -190,7 +187,13 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
                 task["anomaly_type"],
                 str(mask_path),
             )
-            _validate_final_bbox_is_refined(diff["bbox"], expanded_bbox)
+            refined_bbox = _is_refined_final_bbox(diff["bbox"], expanded_bbox)
+            if not refined_bbox:
+                logger.warning(
+                    "%s diff localization produced coarse bbox matching expanded_edit_bbox; "
+                    "writing metadata for in-repo localizer postprocess",
+                    sample_id,
+                )
             crop_info = crop_anomaly(
                 str(generated_path),
                 diff["bbox"],
@@ -205,7 +208,13 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
                 "selected_grid": grid_id,
                 "grid_bbox": list(grid_bbox),
                 "expanded_edit_bbox": list(expanded_bbox),
-                "final_bbox_source": "image_difference_within_selected_grid",
+                "prompt_box": list(expanded_bbox),
+                "final_bbox_source": (
+                    "image_difference_within_selected_grid"
+                    if refined_bbox
+                    else "coarse_expanded_edit_bbox_requires_localizer_postprocess"
+                ),
+                "coarse_bbox_requires_postprocess": not refined_bbox,
                 "diff_method": diff["diff_method"],
                 "mask_uri": relative_uri(mask_path),
                 "vlm_selection": vlm_result,

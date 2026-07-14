@@ -435,6 +435,21 @@ class ContractTests(unittest.TestCase):
             self.assertLessEqual(result["bbox"]["x1"], 35)
             self.assertGreaterEqual(result["bbox"]["x2"], 55)
 
+    def test_i2i_allows_coarse_bbox_for_repo_localizer_postprocess(self) -> None:
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from main import _is_refined_final_bbox
+        finally:
+            sys.path.remove(str(src_dir))
+
+        expanded_bbox = (10, 20, 110, 120)
+        coarse_box = {"format": "xyxy", "x1": 10, "y1": 20, "x2": 110, "y2": 120}
+        refined_box = {"format": "xyxy", "x1": 36, "y1": 42, "x2": 66, "y2": 72}
+
+        self.assertFalse(_is_refined_final_bbox(coarse_box, expanded_bbox))
+        self.assertTrue(_is_refined_final_bbox(refined_box, expanded_bbox))
+
     def test_generation_runtime_uses_anomaly_type_localizer_policy(self) -> None:
         config = load_config(ROOT / "configs" / "autolabel.yaml")
         config["modules"]["generation"]["localizer_policy"] = {
