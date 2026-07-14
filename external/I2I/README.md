@@ -127,6 +127,6 @@ outputs/
 - `grid_previews` 只传给 VLM 选区模型，不传给图像生成模型。
 - 图像生成模型始终接收 clean original image。
 - 对 Wan/DashScope，bbox 通过 `parameters.bbox_list` 传入。
-- 对 Seedream/Ark，默认先裁剪 `expanded_edit_bbox`，只把局部 crop 送入模型；请求 `size` 默认跟随 crop 的 `WIDTHxHEIGHT`，返回图会 resize 回 bbox 尺寸并 paste 到原图，强制保证 bbox 外内容不变。请求仍会写入像素级编辑约束，最终是否可交付由主仓 localizer quality gate 决定。
+- 对 Seedream/Ark，默认先裁剪 `expanded_edit_bbox`，只把局部 crop 送入模型；请求 `size` 保持 crop 宽高比，并按 Ark 最小像素要求放大到不少于 `3686400` 像素，返回图会 resize 回 bbox 尺寸并 paste 到原图，强制保证 bbox 外内容不变。请求仍会写入像素级编辑约束，最终是否可交付由主仓 localizer quality gate 决定。
 - `objects[].box` 必须来自原图/生成图差分或主仓 localizer 后处理结果，不能直接使用 grid 框或 expanded_edit_bbox。
 - 失败样本只写 failure log，不应混入最终 Label Studio 交付结果。

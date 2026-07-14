@@ -519,10 +519,26 @@ class ContractTests(unittest.TestCase):
             self.assertTrue(body["seedream_local_crop_mode"])
             self.assertEqual(body["source_edit_bbox"], [20, 10, 60, 50])
             self.assertEqual(body["edit_bbox"], [0, 0, 40, 40])
-            self.assertEqual(body["size"], "40x40")
+            self.assertEqual(body["size"], "1920x1920")
             self.assertTrue(body["image_urls"][0].endswith("seedream_input_crop.jpg"))
             response_log = read_json(response_log_path)
             self.assertEqual(response_log["local_edit"]["mode"], "crop_then_paste")
+
+    def test_seedream_default_size_scales_crop_aspect_to_min_pixels(self) -> None:
+        from PIL import Image
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from wan_image_client import _seedream_size_for_image
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "crop.jpg"
+            Image.new("RGB", (672, 378), (70, 80, 90)).save(image_path)
+            with patch.dict("os.environ", {"SEEDREAM_SIZE": "auto"}):
+                self.assertEqual(_seedream_size_for_image(image_path), "2560x1440")
 
     def test_seedream_client_allows_explicit_valid_size_override(self) -> None:
         from PIL import Image

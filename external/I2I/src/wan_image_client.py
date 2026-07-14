@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import math
 import os
 import tempfile
 import time
@@ -18,6 +19,8 @@ from prompts import NEGATIVE_PROMPT
 from utils import cv2_imread, cv2_imwrite, image_to_data_url, redact_headers, write_json
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_SEEDREAM_MIN_PIXELS = 3_686_400
 
 
 def _save_base64_image(data: str, output_path: str) -> None:
@@ -197,12 +200,43 @@ def _seedream_size_from_env() -> str | None:
     raise ValueError("SEEDREAM_SIZE must be one of WIDTHxHEIGHT, 2k, 3k, or 4k")
 
 
+def _seedream_min_pixels() -> int:
+    raw = os.getenv("SEEDREAM_MIN_PIXELS", "").strip()
+    if not raw:
+        return DEFAULT_SEEDREAM_MIN_PIXELS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("SEEDREAM_MIN_PIXELS must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError("SEEDREAM_MIN_PIXELS must be a positive integer")
+    return value
+
+
+def _scale_size_to_min_pixels(width: int, height: int, min_pixels: int) -> tuple[int, int]:
+    if width <= 0 or height <= 0:
+        raise ValueError(f"invalid Seedream image size: {width}x{height}")
+    if width * height >= min_pixels:
+        return width, height
+
+    scale = math.sqrt(min_pixels / float(width * height))
+    scaled_width = max(1, math.ceil(width * scale))
+    scaled_height = max(1, math.ceil(height * scale))
+    while scaled_width * scaled_height < min_pixels:
+        if scaled_width / width <= scaled_height / height:
+            scaled_width += 1
+        else:
+            scaled_height += 1
+    return scaled_width, scaled_height
+
+
 def _seedream_size_for_image(image_path: str | Path) -> str:
     override = _seedream_size_from_env()
     if override:
         return override
     with Image.open(image_path) as image:
         width, height = image.size
+    width, height = _scale_size_to_min_pixels(width, height, _seedream_min_pixels())
     return f"{width}x{height}"
 
 
