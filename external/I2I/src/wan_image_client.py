@@ -197,6 +197,15 @@ def _seedream_size_from_env() -> str | None:
     raise ValueError("SEEDREAM_SIZE must be one of WIDTHxHEIGHT, 2k, 3k, or 4k")
 
 
+def _seedream_size_for_image(image_path: str | Path) -> str:
+    override = _seedream_size_from_env()
+    if override:
+        return override
+    with Image.open(image_path) as image:
+        width, height = image.size
+    return f"{width}x{height}"
+
+
 class WanImageClient:
     def __init__(self, model: str, dashscope_config: ModelServiceConfig | DashScopeConfig, dry_run: bool = False):
         self.model = model
@@ -226,9 +235,7 @@ class WanImageClient:
             response_format = os.getenv("SEEDREAM_RESPONSE_FORMAT")
             if response_format:
                 request_payload["response_format"] = response_format
-            size = _seedream_size_from_env()
-            if size:
-                request_payload["size"] = size
+            request_payload["size"] = _seedream_size_for_image(image_path)
             request_payload = _with_seedream_image_input(request_payload, image_to_data_url(image_path))
 
             request_log_payload = dict(request_payload)
