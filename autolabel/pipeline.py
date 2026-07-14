@@ -19,7 +19,7 @@ from .modules.generation.audit_sampler import write_audit_sample_csv
 from .modules.generation.benchmark import write_localizer_benchmark_reports
 from .modules.generation.metadata_builder import apply_localizer_postprocess
 from .sample_factory import make_sample, touch_workflow
-from .utils import get_image_size, now_iso_shanghai, read_csv, write_json
+from .utils import get_image_size, now_iso_shanghai, read_csv, resolve_path, write_json
 from .validators import validate_sample_contract
 
 
@@ -286,6 +286,7 @@ def ingest_generated_metadata(
     metadata_dir: str | Path,
     pipeline_config: dict[str, Any] | None = None,
     tasks_csv: str | Path | None = None,
+    image_root: str | Path | None = None,
 ) -> list[Path]:
     target_dir = Path(metadata_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -295,6 +296,7 @@ def ingest_generated_metadata(
         for row in read_csv(tasks_csv):
             sample_id = row.get("sample_id")
             if sample_id:
+                row = _resolve_generation_source_row(row, image_root=image_root)
                 source_rows_by_sample[sample_id] = row
     benchmark_enabled = True
     if pipeline_config is not None:
@@ -328,3 +330,24 @@ def ingest_generated_metadata(
         write_localizer_benchmark_reports(localizer_results, log_dir, stem=stem)
         write_audit_sample_csv(localizer_results, log_dir / f"audit_sample_list_{timestamp}.csv")
     return written
+
+
+def _resolve_generation_source_row(row: dict[str, Any], image_root: str | Path | None = None) -> dict[str, Any]:
+    resolved = dict(row)
+    image_uri = str(resolved.get("image_uri") or "")
+    if not image_uri or image_root is None:
+        return resolved
+
+    candidates = [
+        resolve_path(image_uri),
+        resolve_path(image_uri, image_root),
+        Path(image_root) / Path(image_uri).name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            resolved["image_uri"] = str(candidate.resolve())
+            return resolved
+
+    candidate = resolve_path(image_uri, image_root)
+    resolved["image_uri"] = str(candidate.resolve())
+    return resolved

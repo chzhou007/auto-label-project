@@ -92,6 +92,7 @@ def main() -> int:
             ingest_metadata_dir,
             pipeline_config=config,
             tasks_csv=tasks,
+            image_root=image_root,
         )
         print(f"Ingested {len(written)} generated metadata files into {ingest_metadata_dir}")
     return 0

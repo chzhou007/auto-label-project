@@ -134,6 +134,7 @@ def run_generation_branch(
             metadata_dir,
             pipeline_config=config,
             tasks_csv=tasks_csv,
+            image_root=image_root,
         )
         print(f"Ingested {len(written)} generated AutoLabelSample files into {metadata_dir}")
     return 0

@@ -777,7 +777,7 @@ class ContractTests(unittest.TestCase):
                     {
                         "sample_id": "sample_generated_localizer",
                         "image_id": "image_generated_localizer",
-                        "image_uri": str(original_path),
+                        "image_uri": original_path.name,
                         "anomaly_type": "water_leak",
                         "source_type": "manual_upload",
                         "task_mode": "generation",
@@ -862,6 +862,7 @@ class ContractTests(unittest.TestCase):
                 metadata_dir,
                 pipeline_config=config,
                 tasks_csv=manifest_path,
+                image_root=root,
             )
 
             self.assertEqual(written, [metadata_dir / "sample_generated_localizer.json"])
