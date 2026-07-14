@@ -184,6 +184,19 @@ def _with_seedream_image_input(payload: dict[str, Any], image_data_url: str) -> 
     return payload
 
 
+def _seedream_size_from_env() -> str | None:
+    size = os.getenv("SEEDREAM_SIZE", "").strip()
+    if not size or size.lower() == "auto":
+        return None
+    normalized = size.lower()
+    if normalized in {"2k", "3k", "4k"}:
+        return normalized
+    parts = normalized.split("x", 1)
+    if len(parts) == 2 and all(part.isdigit() and int(part) > 0 for part in parts):
+        return normalized
+    raise ValueError("SEEDREAM_SIZE must be one of WIDTHxHEIGHT, 2k, 3k, or 4k")
+
+
 class WanImageClient:
     def __init__(self, model: str, dashscope_config: ModelServiceConfig | DashScopeConfig, dry_run: bool = False):
         self.model = model
@@ -213,7 +226,7 @@ class WanImageClient:
             response_format = os.getenv("SEEDREAM_RESPONSE_FORMAT")
             if response_format:
                 request_payload["response_format"] = response_format
-            size = os.getenv("SEEDREAM_SIZE", "auto").strip()
+            size = _seedream_size_from_env()
             if size:
                 request_payload["size"] = size
             request_payload = _with_seedream_image_input(request_payload, image_to_data_url(image_path))
@@ -324,8 +337,8 @@ class WanImageClient:
                 original = original_image.convert("RGB")
                 seedream_crop_bbox = _clip_bbox_to_image(bbox, original.size)
                 crop = original.crop(seedream_crop_bbox)
-            request_image_path = str(temp_dir / "seedream_input_crop.png")
-            crop.save(request_image_path)
+            request_image_path = str(temp_dir / "seedream_input_crop.jpg")
+            crop.save(request_image_path, quality=95)
             request_bbox = (0, 0, crop.size[0], crop.size[1])
             endpoint, request_payload, request_log_payload, is_seedream = self._build_request_payloads(
                 request_image_path, prompt, negative_prompt, request_bbox

@@ -491,6 +491,7 @@ class ContractTests(unittest.TestCase):
             )
 
             with (
+                patch.dict("os.environ", {"SEEDREAM_SIZE": "auto"}),
                 patch("wan_image_client.requests.post", return_value=FakeResponse()),
                 patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
             ):
@@ -518,9 +519,47 @@ class ContractTests(unittest.TestCase):
             self.assertTrue(body["seedream_local_crop_mode"])
             self.assertEqual(body["source_edit_bbox"], [20, 10, 60, 50])
             self.assertEqual(body["edit_bbox"], [0, 0, 40, 40])
-            self.assertEqual(body["size"], "auto")
+            self.assertNotIn("size", body)
+            self.assertTrue(body["image_urls"][0].endswith("seedream_input_crop.jpg"))
             response_log = read_json(response_log_path)
             self.assertEqual(response_log["local_edit"]["mode"], "crop_then_paste")
+
+    def test_seedream_client_rejects_invalid_size_before_request(self) -> None:
+        from PIL import Image
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from config import ModelServiceConfig
+            from wan_image_client import WanImageClient
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original_path = root / "original.jpg"
+            Image.new("RGB", (100, 80), (70, 80, 90)).save(original_path)
+            client = WanImageClient(
+                "doubao-seedream-5.0-lite",
+                ModelServiceConfig(
+                    api_key="test-key",
+                    provider="volcengine_ark",
+                    endpoint="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations",
+                    api_key_env="ARK_API_KEY",
+                    endpoint_env="SEEDREAM_BASE_URL",
+                ),
+            )
+
+            with patch.dict("os.environ", {"SEEDREAM_SIZE": "bad-size"}):
+                with self.assertRaisesRegex(ValueError, "SEEDREAM_SIZE"):
+                    client.edit_image_with_wan(
+                        image_path=str(original_path),
+                        prompt="make a small water leak",
+                        negative_prompt="",
+                        bbox=(20, 10, 60, 50),
+                        output_path=str(root / "generated.png"),
+                        anomaly_type="water_leak",
+                    )
 
     def test_i2i_process_task_generates_once_for_selected_grid_only(self) -> None:
         from PIL import Image, ImageDraw
