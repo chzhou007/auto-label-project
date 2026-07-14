@@ -450,6 +450,148 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(_is_refined_final_bbox(coarse_box, expanded_bbox))
         self.assertTrue(_is_refined_final_bbox(refined_box, expanded_bbox))
 
+    def test_seedream_client_pastes_generated_crop_back_into_original(self) -> None:
+        from PIL import Image
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from config import ModelServiceConfig
+            from wan_image_client import WanImageClient
+        finally:
+            sys.path.remove(str(src_dir))
+
+        class FakeResponse:
+            ok = True
+            status_code = 200
+
+            def json(self):
+                return {"data": [{"url": "https://example.invalid/generated.png"}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original_path = root / "original.jpg"
+            output_path = root / "generated.png"
+            request_log_path = root / "request.json"
+            response_log_path = root / "response.json"
+            Image.new("RGB", (100, 80), (70, 80, 90)).save(original_path)
+
+            def fake_download(_value, target):
+                Image.new("RGB", (256, 256), (220, 235, 245)).save(target)
+
+            client = WanImageClient(
+                "doubao-seedream-5.0-lite",
+                ModelServiceConfig(
+                    api_key="test-key",
+                    provider="volcengine_ark",
+                    endpoint="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations",
+                    api_key_env="ARK_API_KEY",
+                    endpoint_env="SEEDREAM_BASE_URL",
+                ),
+            )
+
+            with (
+                patch("wan_image_client.requests.post", return_value=FakeResponse()),
+                patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
+            ):
+                client.edit_image_with_wan(
+                    image_path=str(original_path),
+                    prompt="make a small water leak",
+                    negative_prompt="",
+                    bbox=(20, 10, 60, 50),
+                    output_path=str(output_path),
+                    anomaly_type="water_leak",
+                    request_log_path=str(request_log_path),
+                    response_log_path=str(response_log_path),
+                )
+
+            with Image.open(original_path) as original_image, Image.open(output_path) as generated_image:
+                original = original_image.convert("RGB")
+                generated = generated_image.convert("RGB")
+                self.assertEqual(generated.size, original.size)
+                self.assertEqual(generated.getpixel((5, 5)), original.getpixel((5, 5)))
+                self.assertEqual(generated.getpixel((95, 75)), original.getpixel((95, 75)))
+                self.assertNotEqual(generated.getpixel((30, 20)), original.getpixel((30, 20)))
+
+            request_log = read_json(request_log_path)
+            body = request_log["body"]
+            self.assertTrue(body["seedream_local_crop_mode"])
+            self.assertEqual(body["source_edit_bbox"], [20, 10, 60, 50])
+            self.assertEqual(body["edit_bbox"], [0, 0, 40, 40])
+            self.assertEqual(body["size"], "auto")
+            response_log = read_json(response_log_path)
+            self.assertEqual(response_log["local_edit"]["mode"], "crop_then_paste")
+
+    def test_i2i_process_task_generates_once_for_selected_grid_only(self) -> None:
+        from PIL import Image, ImageDraw
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from config import PipelineConfig
+            from main import process_task
+            from utils import ensure_output_dirs
+        finally:
+            sys.path.remove(str(src_dir))
+
+        class FakeVLM:
+            def select_grid_with_qwen(self, *_args, **_kwargs):
+                return {
+                    "selected_grid": "C2",
+                    "confidence": 0.98,
+                    "top_candidates": [
+                        {"grid": "C2", "score": 0.98},
+                        {"grid": "D2", "score": 0.90},
+                        {"grid": "B2", "score": 0.85},
+                    ],
+                }
+
+        class FakeWan:
+            def __init__(self):
+                self.calls = []
+
+            def edit_image_with_wan(self, **kwargs):
+                self.calls.append(kwargs)
+                with Image.open(kwargs["image_path"]) as image:
+                    generated = image.convert("RGB")
+                x1, y1, x2, y2 = kwargs["bbox"]
+                draw = ImageDraw.Draw(generated)
+                draw.ellipse((x1 + 15, y1 + 12, x1 + 38, y1 + 28), fill=(225, 235, 240))
+                Path(kwargs["output_path"]).parent.mkdir(parents=True, exist_ok=True)
+                generated.save(kwargs["output_path"])
+                return {"fake": True}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_root = root / "images"
+            output_root = root / "out"
+            image_root.mkdir()
+            original_path = image_root / "source.jpg"
+            Image.new("RGB", (160, 120), (80, 80, 80)).save(original_path)
+            dirs = ensure_output_dirs(output_root)
+            cfg = PipelineConfig(
+                tasks=str(root / "tasks.csv"),
+                image_root=str(image_root),
+                output_root=str(output_root),
+                dry_run=False,
+                max_retries=0,
+            )
+            task = {
+                "sample_id": "sample_once",
+                "image_id": "source",
+                "image_uri": str(original_path),
+                "anomaly_type": "water_leak",
+                "source_type": "manual_upload",
+            }
+            fake_wan = FakeWan()
+
+            self.assertTrue(process_task(task, cfg, dirs, FakeVLM(), fake_wan))
+            self.assertEqual(len(fake_wan.calls), 1)
+            written = read_json(dirs["metadata"] / "sample_once.json")
+            params = written["objects"][0]["geometry_detail"]["generation_params"]
+            self.assertEqual(params["selected_grid"], "C2")
+            self.assertEqual(params["candidate_grids"], ["C2", "D2", "B2"])
+
     def test_generation_runtime_uses_anomaly_type_localizer_policy(self) -> None:
         config = load_config(ROOT / "configs" / "autolabel.yaml")
         config["modules"]["generation"]["localizer_policy"] = {

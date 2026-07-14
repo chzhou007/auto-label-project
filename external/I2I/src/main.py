@@ -160,94 +160,95 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
     mask_path = dirs["masks"] / f"{sample_id}_obj_000001_mask.png"
     crop_path = dirs["crops"] / f"{sample_id}_obj_000001_crop.jpg"
 
-    candidates = _candidate_grids(vlm_result)
-    for grid_id in candidates:
-        try:
-            grid_bbox = grid_id_to_bbox(grid_id, width, height)
-            expanded_bbox = expand_bbox(grid_bbox, width, height, cfg.edit_bbox_expand_ratio)
-            wan.edit_image_with_wan(
-                image_path=str(original_path),
-                prompt=prompt,
-                negative_prompt=NEGATIVE_PROMPT,
-                bbox=expanded_bbox,
-                output_path=str(generated_path),
-                anomaly_type=task["anomaly_type"],
-                request_log_path=str(dirs["logs"] / f"{sample_id}_wan_request.json"),
-                response_log_path=str(dirs["logs"] / f"{sample_id}_wan_response.json"),
-            )
+    candidate_grids = _candidate_grids(vlm_result)
+    grid_id = str(vlm_result["selected_grid"]).strip().upper()
+    try:
+        grid_bbox = grid_id_to_bbox(grid_id, width, height)
+        expanded_bbox = expand_bbox(grid_bbox, width, height, cfg.edit_bbox_expand_ratio)
+        wan.edit_image_with_wan(
+            image_path=str(original_path),
+            prompt=prompt,
+            negative_prompt=NEGATIVE_PROMPT,
+            bbox=expanded_bbox,
+            output_path=str(generated_path),
+            anomaly_type=task["anomaly_type"],
+            request_log_path=str(dirs["logs"] / f"{sample_id}_wan_request.json"),
+            response_log_path=str(dirs["logs"] / f"{sample_id}_wan_response.json"),
+        )
+        gen_width, gen_height = image_size(generated_path)
+        if (gen_width, gen_height) != (width, height):
+            logger.info("%s generated image size differs; resizing generated image to original dimensions", sample_id)
+            _normalize_generated_size(generated_path, (width, height))
             gen_width, gen_height = image_size(generated_path)
-            if (gen_width, gen_height) != (width, height):
-                logger.info("%s generated image size differs; resizing generated image to original dimensions", sample_id)
-                _normalize_generated_size(generated_path, (width, height))
-                gen_width, gen_height = image_size(generated_path)
-            diff = localize_change_bbox(
-                str(original_path),
-                str(generated_path),
-                expanded_bbox,
-                task["anomaly_type"],
-                str(mask_path),
+        diff = localize_change_bbox(
+            str(original_path),
+            str(generated_path),
+            expanded_bbox,
+            task["anomaly_type"],
+            str(mask_path),
+        )
+        refined_bbox = _is_refined_final_bbox(diff["bbox"], expanded_bbox)
+        if not refined_bbox:
+            logger.warning(
+                "%s diff localization produced coarse bbox matching expanded_edit_bbox; "
+                "writing metadata for in-repo localizer postprocess",
+                sample_id,
             )
-            refined_bbox = _is_refined_final_bbox(diff["bbox"], expanded_bbox)
-            if not refined_bbox:
-                logger.warning(
-                    "%s diff localization produced coarse bbox matching expanded_edit_bbox; "
-                    "writing metadata for in-repo localizer postprocess",
-                    sample_id,
-                )
-            crop_info = crop_anomaly(
-                str(generated_path),
-                diff["bbox"],
-                str(crop_path),
-                cfg.crop_expand_ratio,
-            )
-            generation_params = {
-                "localization_pipeline": "vlm_grid_selection_then_image_edit_then_image_diff",
-                "vlm_model": cfg.vlm_model,
-                "image_generation_model": cfg.image_model,
-                "grid_layout": cfg.grid_layout,
-                "selected_grid": grid_id,
-                "grid_bbox": list(grid_bbox),
-                "expanded_edit_bbox": list(expanded_bbox),
-                "prompt_box": list(expanded_bbox),
-                "final_bbox_source": (
-                    "image_difference_within_selected_grid"
-                    if refined_bbox
-                    else "coarse_expanded_edit_bbox_requires_localizer_postprocess"
-                ),
-                "coarse_bbox_requires_postprocess": not refined_bbox,
-                "diff_method": diff["diff_method"],
-                "mask_uri": relative_uri(mask_path),
-                "vlm_selection": vlm_result,
-            }
-            sample = build_autolabel_sample(
-                task=task,
-                generated_image_uri=relative_uri(generated_path),
-                width=gen_width,
-                height=gen_height,
-                object_box=diff["bbox"],
-                crop_info={**crop_info, "crop_uri": relative_uri(crop_path)},
-                classification_labels=build_classification_labels(task["anomaly_type"]),
-                generation_params=generation_params,
-                generation_prompt=prompt,
-                image_model=cfg.image_model,
-                vlm_model=cfg.vlm_model,
-            )
-            validate_required_fields(sample)
-            write_json(dirs["metadata"] / f"{sample_id}.json", sample)
-            if failure_log.exists():
-                failure_log.unlink()
-            logger.info("%s succeeded with grid=%s final_bbox=%s", sample_id, grid_id, diff["bbox"])
-            return True
-        except Exception as exc:
-            last_error = exc
-            logger.warning("%s generation/localization failed for grid %s: %s", sample_id, grid_id, exc)
+        crop_info = crop_anomaly(
+            str(generated_path),
+            diff["bbox"],
+            str(crop_path),
+            cfg.crop_expand_ratio,
+        )
+        generation_params = {
+            "localization_pipeline": "vlm_grid_selection_then_image_edit_then_image_diff",
+            "vlm_model": cfg.vlm_model,
+            "image_generation_model": cfg.image_model,
+            "grid_layout": cfg.grid_layout,
+            "selected_grid": grid_id,
+            "candidate_grids": candidate_grids,
+            "grid_bbox": list(grid_bbox),
+            "expanded_edit_bbox": list(expanded_bbox),
+            "prompt_box": list(expanded_bbox),
+            "final_bbox_source": (
+                "image_difference_within_selected_grid"
+                if refined_bbox
+                else "coarse_expanded_edit_bbox_requires_localizer_postprocess"
+            ),
+            "coarse_bbox_requires_postprocess": not refined_bbox,
+            "diff_method": diff["diff_method"],
+            "mask_uri": relative_uri(mask_path),
+            "vlm_selection": vlm_result,
+        }
+        sample = build_autolabel_sample(
+            task=task,
+            generated_image_uri=relative_uri(generated_path),
+            width=gen_width,
+            height=gen_height,
+            object_box=diff["bbox"],
+            crop_info={**crop_info, "crop_uri": relative_uri(crop_path)},
+            classification_labels=build_classification_labels(task["anomaly_type"]),
+            generation_params=generation_params,
+            generation_prompt=prompt,
+            image_model=cfg.image_model,
+            vlm_model=cfg.vlm_model,
+        )
+        validate_required_fields(sample)
+        write_json(dirs["metadata"] / f"{sample_id}.json", sample)
+        if failure_log.exists():
+            failure_log.unlink()
+        logger.info("%s succeeded with grid=%s final_bbox=%s", sample_id, grid_id, diff["bbox"])
+        return True
+    except Exception as exc:
+        last_error = exc
+        logger.warning("%s generation/localization failed for selected grid %s: %s", sample_id, grid_id, exc)
 
     _write_failure(
         dirs["logs"],
         sample_id,
         "generation_or_diff",
         last_error or "unknown generation/diff failure",
-        {"vlm_result": vlm_result, "candidate_grids": candidates},
+        {"vlm_result": vlm_result, "candidate_grids": candidate_grids, "selected_grid": grid_id},
     )
     return False
 

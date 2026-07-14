@@ -3,12 +3,14 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+from PIL import Image
 import requests
 
 from config import DashScopeConfig, I2IServiceConfig, ModelServiceConfig
@@ -79,6 +81,35 @@ def _download_or_decode_image(value: str, output_path: str) -> None:
         Path(output_path).write_bytes(resp.content)
     else:
         _save_base64_image(value, output_path)
+
+
+def _clip_bbox_to_image(bbox: tuple[int, int, int, int], size: tuple[int, int]) -> tuple[int, int, int, int]:
+    width, height = size
+    x1, y1, x2, y2 = bbox
+    clipped = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
+    if clipped[2] <= clipped[0] or clipped[3] <= clipped[1]:
+        raise ValueError(f"empty edit bbox after clipping: {bbox}")
+    return clipped
+
+
+def _paste_generated_crop(
+    original_image_path: str,
+    generated_crop_path: str,
+    output_path: str,
+    bbox: tuple[int, int, int, int],
+) -> None:
+    with Image.open(original_image_path) as original_image:
+        original = original_image.convert("RGB")
+    x1, y1, x2, y2 = _clip_bbox_to_image(bbox, original.size)
+    target_size = (x2 - x1, y2 - y1)
+    with Image.open(generated_crop_path) as crop_image:
+        generated_crop = crop_image.convert("RGB")
+        if generated_crop.size != target_size:
+            generated_crop = generated_crop.resize(target_size, Image.Resampling.LANCZOS)
+    composed = original.copy()
+    composed.paste(generated_crop, (x1, y1))
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    composed.save(output_path)
 
 
 def _dry_run_edit(image_path: str, bbox: tuple[int, int, int, int], anomaly_type: str, output_path: str) -> None:
@@ -182,7 +213,7 @@ class WanImageClient:
             response_format = os.getenv("SEEDREAM_RESPONSE_FORMAT")
             if response_format:
                 request_payload["response_format"] = response_format
-            size = os.getenv("SEEDREAM_SIZE")
+            size = os.getenv("SEEDREAM_SIZE", "auto").strip()
             if size:
                 request_payload["size"] = size
             request_payload = _with_seedream_image_input(request_payload, image_to_data_url(image_path))
@@ -249,9 +280,17 @@ class WanImageClient:
         request_log_path: str | None = None,
         response_log_path: str | None = None,
     ) -> dict[str, Any]:
-        endpoint, request_payload, request_log_payload, is_seedream = self._build_request_payloads(
-            image_path, prompt, negative_prompt, bbox
-        )
+        endpoint = _service_endpoint(self.config)
+        is_seedream = _is_seedream_provider(self.config, endpoint, self.model)
+        request_payload: dict[str, Any]
+        request_log_payload: dict[str, Any]
+        if not (is_seedream and not self.dry_run):
+            endpoint, request_payload, request_log_payload, is_seedream = self._build_request_payloads(
+                image_path, prompt, negative_prompt, bbox
+            )
+        else:
+            request_payload = {}
+            request_log_payload = {}
         if request_log_path:
             write_json(
                 request_log_path,
@@ -272,6 +311,30 @@ class WanImageClient:
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
+
+        temp_dir_obj: tempfile.TemporaryDirectory[str] | None = None
+        request_image_path = image_path
+        request_bbox = bbox
+        compose_seedream_crop = False
+        seedream_crop_bbox: tuple[int, int, int, int] | None = None
+        if is_seedream:
+            temp_dir_obj = tempfile.TemporaryDirectory(prefix="seedream_i2i_")
+            temp_dir = Path(temp_dir_obj.name)
+            with Image.open(image_path) as original_image:
+                original = original_image.convert("RGB")
+                seedream_crop_bbox = _clip_bbox_to_image(bbox, original.size)
+                crop = original.crop(seedream_crop_bbox)
+            request_image_path = str(temp_dir / "seedream_input_crop.png")
+            crop.save(request_image_path)
+            request_bbox = (0, 0, crop.size[0], crop.size[1])
+            endpoint, request_payload, request_log_payload, is_seedream = self._build_request_payloads(
+                request_image_path, prompt, negative_prompt, request_bbox
+            )
+            request_log_payload["source_image_path"] = image_path
+            request_log_payload["source_edit_bbox"] = list(seedream_crop_bbox)
+            request_log_payload["seedream_local_crop_mode"] = True
+            compose_seedream_crop = True
+
         if request_log_path:
             write_json(
                 request_log_path,
@@ -282,20 +345,40 @@ class WanImageClient:
                     "body": request_log_payload,
                 },
             )
-        response = requests.post(endpoint, headers=headers, json=request_payload, timeout=180)
-        raw: dict[str, Any]
         try:
-            raw = response.json()
-        except Exception:
-            raw = {"status_code": response.status_code, "text": response.text}
-        if not response.ok:
-            if response_log_path:
-                write_json(response_log_path, raw)
-            raise RuntimeError(f"image generation request failed: HTTP {response.status_code}")
+            response = requests.post(endpoint, headers=headers, json=request_payload, timeout=180)
+            raw: dict[str, Any]
+            try:
+                raw = response.json()
+            except Exception:
+                raw = {"status_code": response.status_code, "text": response.text}
+            if not response.ok:
+                if response_log_path:
+                    write_json(response_log_path, raw)
+                raise RuntimeError(f"image generation request failed: HTTP {response.status_code}")
 
-        final_response = self._resolve_async_if_needed(raw, headers, is_seedream)
-        image_value = _extract_image_url_or_base64(final_response)
-        _download_or_decode_image(image_value, output_path)
+            final_response = self._resolve_async_if_needed(raw, headers, is_seedream)
+            image_value = _extract_image_url_or_base64(final_response)
+            download_target = output_path
+            if compose_seedream_crop:
+                download_target = str(Path(temp_dir_obj.name) / "seedream_generated_crop.png")  # type: ignore[union-attr]
+            _download_or_decode_image(image_value, download_target)
+            if compose_seedream_crop:
+                if seedream_crop_bbox is None:
+                    raise RuntimeError("missing Seedream crop bbox for local composition")
+                _paste_generated_crop(image_path, download_target, output_path, seedream_crop_bbox)
+                final_response.setdefault("local_edit", {})
+                final_response["local_edit"].update(
+                    {
+                        "mode": "crop_then_paste",
+                        "source_edit_bbox": list(seedream_crop_bbox),
+                        "request_bbox": list(request_bbox),
+                        "output_path": output_path,
+                    }
+                )
+        finally:
+            if temp_dir_obj is not None:
+                temp_dir_obj.cleanup()
         if response_log_path:
             write_json(response_log_path, final_response)
         return final_response
