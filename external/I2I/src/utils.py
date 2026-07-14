@@ -12,6 +12,29 @@ from typing import Any
 from PIL import Image
 
 
+def cv2_imread(path: str | Path, flags: int):
+    import cv2
+    import numpy as np
+
+    data = np.fromfile(str(path), dtype=np.uint8)
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, flags)
+
+
+def cv2_imwrite(path: str | Path, image) -> bool:
+    import cv2
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    suffix = target.suffix or ".png"
+    ok, encoded = cv2.imencode(suffix, image)
+    if not ok:
+        return False
+    encoded.tofile(str(target))
+    return True
+
+
 def ensure_output_dirs(output_root: str | Path) -> dict[str, Path]:
     root = Path(output_root)
     dirs = {

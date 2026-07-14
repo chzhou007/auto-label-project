@@ -13,7 +13,7 @@ import requests
 
 from config import DashScopeConfig, I2IServiceConfig, ModelServiceConfig
 from prompts import NEGATIVE_PROMPT
-from utils import image_to_data_url, redact_headers, write_json
+from utils import cv2_imread, cv2_imwrite, image_to_data_url, redact_headers, write_json
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ def _download_or_decode_image(value: str, output_path: str) -> None:
 
 
 def _dry_run_edit(image_path: str, bbox: tuple[int, int, int, int], anomaly_type: str, output_path: str) -> None:
-    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    image = cv2_imread(image_path, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(f"failed to read image: {image_path}")
     x1, y1, x2, y2 = bbox
@@ -113,7 +113,7 @@ def _dry_run_edit(image_path: str, bbox: tuple[int, int, int, int], anomaly_type
         )
     cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0, image)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(output_path, image)
+    cv2_imwrite(output_path, image)
 
 
 def _service_endpoint(config: ModelServiceConfig | DashScopeConfig) -> str:

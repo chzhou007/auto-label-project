@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from copy import deepcopy
@@ -397,6 +398,42 @@ class ContractTests(unittest.TestCase):
 
         self.assertEqual(Path(recorded["cmd"][1]), project_dir / "src" / "main.py")
         self.assertEqual(Path(recorded["kwargs"]["cwd"]), project_dir)
+
+    def test_i2i_diff_localizer_reads_unicode_windows_paths(self) -> None:
+        from PIL import Image, ImageDraw
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from diff_localizer import localize_change_bbox
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original_path = root / "A1-制冷方舱原图.jpg"
+            edited_path = root / "A1-制冷方舱生成.jpg"
+            mask_path = root / "输出" / "掩码.png"
+
+            original = Image.new("RGB", (96, 80), (80, 80, 80))
+            edited = original.copy()
+            draw = ImageDraw.Draw(edited)
+            draw.rectangle((30, 28, 58, 48), fill=(225, 225, 225))
+            original.save(original_path)
+            edited.save(edited_path)
+
+            result = localize_change_bbox(
+                str(original_path),
+                str(edited_path),
+                (0, 0, 96, 80),
+                "water_leak",
+                str(mask_path),
+            )
+
+            self.assertTrue(mask_path.exists())
+            self.assertEqual(result["status"], "ok")
+            self.assertLessEqual(result["bbox"]["x1"], 35)
+            self.assertGreaterEqual(result["bbox"]["x2"], 55)
 
     def test_generation_runtime_uses_anomaly_type_localizer_policy(self) -> None:
         config = load_config(ROOT / "configs" / "autolabel.yaml")

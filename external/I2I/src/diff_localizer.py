@@ -5,6 +5,7 @@ import numpy as np
 from pathlib import Path
 
 from grid import bbox_to_box_dict
+from utils import cv2_imread, cv2_imwrite
 
 
 def _clip_roi(roi_bbox: tuple[int, int, int, int], width: int, height: int) -> tuple[int, int, int, int]:
@@ -19,8 +20,8 @@ def localize_change_bbox(
     anomaly_type: str,
     mask_output_path: str,
 ) -> dict:
-    original = cv2.imread(original_image_path, cv2.IMREAD_COLOR)
-    edited = cv2.imread(edited_image_path, cv2.IMREAD_COLOR)
+    original = cv2_imread(original_image_path, cv2.IMREAD_COLOR)
+    edited = cv2_imread(edited_image_path, cv2.IMREAD_COLOR)
     if original is None:
         raise ValueError(f"failed to read original image: {original_image_path}")
     if edited is None:
@@ -107,7 +108,7 @@ def localize_change_bbox(
     full_mask = np.zeros((height, width), dtype=np.uint8)
     full_mask[y1:y2, x1:x2] = keep
     Path(mask_output_path).parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(mask_output_path, full_mask)
+    cv2_imwrite(mask_output_path, full_mask)
 
     return {
         "bbox": bbox_to_box_dict((bx1, by1, bx2, by2)),
