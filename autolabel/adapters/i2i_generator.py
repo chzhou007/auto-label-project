@@ -12,7 +12,7 @@ from ..validators import validate_sample_contract
 
 class I2IGenerator:
     def __init__(self, i2i_project: str | Path) -> None:
-        self.i2i_project = Path(i2i_project)
+        self.i2i_project = Path(i2i_project).resolve()
 
     @property
     def main_py(self) -> Path:

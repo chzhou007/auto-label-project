@@ -376,6 +376,28 @@ class ContractTests(unittest.TestCase):
             self.assertIn("pgcd_lpips", recorded["cmd"])
             self.assertIn("--localizer-debug", recorded["cmd"])
 
+    def test_i2i_generator_resolves_relative_project_dir_before_subprocess(self) -> None:
+        from autolabel.adapters.i2i_generator import I2IGenerator
+
+        project_dir = ROOT / "external" / "I2I"
+        recorded = {}
+
+        def fake_run(cmd, **kwargs):
+            recorded["cmd"] = cmd
+            recorded["kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch("autolabel.adapters.i2i_generator.subprocess.run", side_effect=fake_run):
+            I2IGenerator(Path("external") / "I2I").run(
+                tasks_csv=ROOT / "configs" / "task_manifest.example.csv",
+                image_root=ROOT,
+                output_root=ROOT / "data" / "processed" / "i2i_outputs",
+                dry_run=True,
+            )
+
+        self.assertEqual(Path(recorded["cmd"][1]), project_dir / "src" / "main.py")
+        self.assertEqual(Path(recorded["kwargs"]["cwd"]), project_dir)
+
     def test_generation_runtime_uses_anomaly_type_localizer_policy(self) -> None:
         config = load_config(ROOT / "configs" / "autolabel.yaml")
         config["modules"]["generation"]["localizer_policy"] = {
