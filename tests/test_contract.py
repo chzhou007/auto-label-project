@@ -726,17 +726,35 @@ class ContractTests(unittest.TestCase):
             original_path = root / "original.jpg"
             red_path = root / "red.jpg"
             drift_path = root / "drift.jpg"
-            Image.new("RGB", (100, 80), (70, 80, 90)).save(original_path)
+            tone_shift_path = root / "tone_shift.jpg"
+            original = Image.new("RGB", (100, 80), (70, 80, 90))
+            original_draw = ImageDraw.Draw(original)
+            original_draw.rectangle((5, 5, 18, 70), fill=(20, 20, 20))
+            original_draw.rectangle((70, 10, 92, 70), fill=(130, 130, 130))
+            original.save(original_path)
             red_image = Image.new("RGB", (100, 80), (70, 80, 90))
             ImageDraw.Draw(red_image).rectangle((20, 10, 60, 50), fill=(255, 0, 0))
             red_image.save(red_path)
-            Image.new("RGB", (100, 80), (220, 220, 220)).save(drift_path)
+            tone_shift = Image.new("RGB", (100, 80), (125, 135, 145))
+            tone_draw = ImageDraw.Draw(tone_shift)
+            tone_draw.rectangle((5, 5, 18, 70), fill=(75, 75, 75))
+            tone_draw.rectangle((70, 10, 92, 70), fill=(185, 185, 185))
+            tone_shift.save(tone_shift_path)
+            drift = Image.new("RGB", (100, 80), (220, 220, 220))
+            drift_draw = ImageDraw.Draw(drift)
+            drift_draw.rectangle((35, 5, 48, 70), fill=(20, 20, 20))
+            drift_draw.rectangle((8, 10, 30, 70), fill=(130, 130, 130))
+            drift.save(drift_path)
 
             red_quality = _validate_seedream_experiment_output(original_path, red_path, (20, 10, 60, 50), "boxed_fusion")
+            tone_quality = _validate_seedream_experiment_output(original_path, tone_shift_path, (20, 10, 60, 50), "single_image_edit")
             drift_quality = _validate_seedream_experiment_output(original_path, drift_path, (20, 10, 60, 50), "single_image_edit")
 
             self.assertFalse(red_quality["passes_quality"])
             self.assertIn("seedream_red_box_residual", red_quality["quality_reason"])
+            self.assertGreater(tone_quality["outside_change_ratio"], 0.20)
+            self.assertLess(tone_quality["outside_structure_change_ratio"], 0.25)
+            self.assertTrue(tone_quality["passes_quality"])
             self.assertFalse(drift_quality["passes_quality"])
             self.assertIn("seedream_outside_region_change_high", drift_quality["quality_reason"])
 

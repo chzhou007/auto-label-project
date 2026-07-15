@@ -231,6 +231,61 @@ def _outside_change_ratio(
     return float((diff[mask] > threshold).mean())
 
 
+def _edge_map(rgb_array: np.ndarray, threshold: float) -> np.ndarray:
+    gray = (
+        0.299 * rgb_array[:, :, 0].astype(np.float32)
+        + 0.587 * rgb_array[:, :, 1].astype(np.float32)
+        + 0.114 * rgb_array[:, :, 2].astype(np.float32)
+    ) / 255.0
+    gx = np.zeros_like(gray)
+    gy = np.zeros_like(gray)
+    gx[:, 1:] = np.abs(gray[:, 1:] - gray[:, :-1])
+    gy[1:, :] = np.abs(gray[1:, :] - gray[:-1, :])
+    return np.maximum(gx, gy) > threshold
+
+
+def _outside_structure_change_ratio(
+    original_path: str | Path,
+    generated_path: str | Path,
+    allowed_bbox: tuple[int, int, int, int],
+) -> float:
+    with Image.open(original_path) as original_image, Image.open(generated_path) as generated_image:
+        original = original_image.convert("RGB")
+        generated = generated_image.convert("RGB")
+        if generated.size != original.size:
+            generated = generated.resize(original.size, Image.Resampling.LANCZOS)
+
+        max_side = int(os.getenv("SEEDREAM_STRUCTURE_MAX_SIDE", "640"))
+        scale = min(1.0, max_side / float(max(original.size)))
+        if scale < 1.0:
+            resized_size = (max(1, int(original.size[0] * scale)), max(1, int(original.size[1] * scale)))
+            original = original.resize(resized_size, Image.Resampling.BICUBIC)
+            generated = generated.resize(resized_size, Image.Resampling.BICUBIC)
+
+    original_array = np.asarray(original, dtype=np.uint8)
+    generated_array = np.asarray(generated, dtype=np.uint8)
+    height, width = original_array.shape[:2]
+    x1, y1, x2, y2 = allowed_bbox
+    if scale < 1.0:
+        x1, x2 = int(x1 * scale), int(x2 * scale)
+        y1, y2 = int(y1 * scale), int(y2 * scale)
+    mask = np.ones((height, width), dtype=bool)
+    x1 = max(0, min(width, x1))
+    x2 = max(0, min(width, x2))
+    y1 = max(0, min(height, y1))
+    y2 = max(0, min(height, y2))
+    if x2 > x1 and y2 > y1:
+        mask[y1:y2, x1:x2] = False
+    if not np.any(mask):
+        return 0.0
+
+    edge_threshold = float(os.getenv("SEEDREAM_STRUCTURE_EDGE_THRESHOLD", "0.08"))
+    original_edges = _edge_map(original_array, edge_threshold)
+    generated_edges = _edge_map(generated_array, edge_threshold)
+    changed_edges = np.logical_xor(original_edges, generated_edges)
+    return float(changed_edges[mask].mean())
+
+
 def _validate_seedream_experiment_output(
     original_path: str | Path,
     generated_path: str | Path,
@@ -241,11 +296,16 @@ def _validate_seedream_experiment_output(
         "passes_quality": True,
         "quality_reason": None,
         "outside_change_ratio": _outside_change_ratio(original_path, generated_path, allowed_bbox),
+        "outside_structure_change_ratio": _outside_structure_change_ratio(original_path, generated_path, allowed_bbox),
         "red_box_residual_ratio": 0.0,
     }
     max_outside_change = float(str(os.getenv("SEEDREAM_MAX_OUTSIDE_CHANGE_RATIO", "0.20")).strip())
+    max_structure_change = float(str(os.getenv("SEEDREAM_MAX_OUTSIDE_STRUCTURE_CHANGE_RATIO", "0.05")).strip())
     reasons = []
-    if result["outside_change_ratio"] > max_outside_change:
+    if (
+        result["outside_change_ratio"] > max_outside_change
+        and result["outside_structure_change_ratio"] > max_structure_change
+    ):
         reasons.append("seedream_outside_region_change_high")
     if seedream_mode == "boxed_fusion":
         result["red_box_residual_ratio"] = _red_pixel_ratio(generated_path, allowed_bbox)
@@ -366,6 +426,7 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
                     "Seedream experiment quality failed: "
                     f"{seedream_quality['quality_reason']} "
                     f"(outside_change_ratio={seedream_quality.get('outside_change_ratio')}, "
+                    f"outside_structure_change_ratio={seedream_quality.get('outside_structure_change_ratio')}, "
                     f"red_box_residual_ratio={seedream_quality.get('red_box_residual_ratio')})"
                 )
         elif cfg.seedream_mode:
@@ -373,6 +434,7 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
                 "passes_quality": True,
                 "quality_reason": "dry_run_not_evaluated",
                 "outside_change_ratio": None,
+                "outside_structure_change_ratio": None,
                 "red_box_residual_ratio": None,
             }
         diff = localize_change_bbox(
