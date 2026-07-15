@@ -230,21 +230,35 @@ def _seedream_prompt(
     x1, y1, x2, y2 = bbox
     if seedream_mode == "single_image_edit":
         return (
-            f"{prompt}\n\n"
-            "Seedream experiment mode: single_image_edit. Use the input image as the source image. "
-            f"Add one small realistic early-stage water leak near pixel bbox [x1={x1}, y1={y1}, x2={x2}, y2={y2}] "
-            "or inside the selected grid. Return a full image with the same scene, camera, timestamp, equipment, "
-            "background, and layout. Do not create a new room, do not crop, do not add an inset image, and keep all "
-            "content outside the target region visually unchanged."
+            "Seedream experiment mode: single_image_edit. This is image-to-image local editing, not text-to-image "
+            "generation. Treat the input image as the only base image and preserve the original scene exactly.\n\n"
+            "Primary instruction: keep the same camera, viewpoint, crop, perspective, room, equipment, timestamp, "
+            "text overlays, lighting, background, and layout. Do not create a new room, do not replace equipment, "
+            "do not change the camera angle, do not stylize, do not zoom, do not crop, and do not add an inset image.\n\n"
+            f"Edit only inside pixel bbox [x1={x1}, y1={y1}, x2={x2}, y2={y2}]. Inside that bbox, add one small, "
+            "realistic, early-stage clear water leak: subtle transparent water droplets, a thin downward trickle, "
+            "or a small wet reflective stain that follows the existing pipe/equipment/floor geometry. Outside this "
+            "bbox, keep pixels visually unchanged as much as possible.\n\n"
+            "Return one complete full-frame image matching the input image. The only visible difference should be "
+            "the small water leak inside the bbox.\n\n"
+            f"Additional anomaly detail:\n{prompt}"
         )
     if seedream_mode == "boxed_fusion":
         return (
-            f"{prompt}\n\n"
-            "Seedream experiment mode: boxed_fusion. The first input image is the industrial source image with a red "
-            "rectangle guide. The second input image is a water-stain reference. Fuse only the water-stain appearance "
-            f"from the reference image into the red rectangle region [x1={x1}, y1={y1}, x2={x2}, y2={y2}] on the "
-            "source image. Remove the red rectangle completely in the final image. Return one full-size source-scene "
-            "image, not a crop and not an inset. Preserve all pixels outside the rectangle as much as possible."
+            "Seedream experiment mode: boxed_fusion. This is image-to-image local fusion, not text-to-image "
+            "generation and not scene replacement.\n\n"
+            "Input image rules: the first image is the only base/source scene. The first image contains a red rectangle "
+            "guide. The second image is only a water-stain visual reference. Use only the water stain's texture, "
+            "transparency, highlight pattern, edge shape, and wet-reflection appearance from the second image. Do not "
+            "copy the second image's background, room, camera, equipment, timestamp, composition, or lighting.\n\n"
+            f"Edit only inside the red rectangle / pixel bbox [x1={x1}, y1={y1}, x2={x2}, y2={y2}] on the first "
+            "image. Remove the red rectangle completely in the final image. Inside this bbox, create one small, "
+            "realistic, early-stage clear water leak that conforms to the local pipe/equipment/floor geometry. Outside "
+            "this bbox, preserve the first image visually unchanged.\n\n"
+            "Return one complete full-frame image matching the first input image. Do not crop, do not zoom, do not add "
+            "an inset image, do not change the scene, and do not replace any equipment. The only visible difference "
+            "should be the small water leak inside the red rectangle.\n\n"
+            f"Additional anomaly detail:\n{prompt}"
         )
     return (
         f"{prompt}\n\n"

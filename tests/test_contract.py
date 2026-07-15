@@ -622,6 +622,9 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(body["n"], 1)
             self.assertEqual(body["image_urls"], [str(original_path)])
             self.assertNotIn("seedream_local_crop_mode", body)
+            self.assertIn("image-to-image local editing, not text-to-image generation", body["prompt"])
+            self.assertIn("Edit only inside pixel bbox", body["prompt"])
+            self.assertNotIn("or inside the selected grid", body["prompt"])
 
     def test_seedream_boxed_fusion_uses_guide_and_reference_inputs(self) -> None:
         from PIL import Image
@@ -684,6 +687,9 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(body["seedream_mode"], "boxed_fusion")
             self.assertEqual(body["n"], 1)
             self.assertEqual(body["image_urls"], [str(guide_path), str(reference_path)])
+            self.assertTrue(body["prompt"].startswith("Seedream experiment mode: boxed_fusion"))
+            self.assertIn("The second image is only a water-stain visual reference", body["prompt"])
+            self.assertIn("Do not copy the second image's background", body["prompt"])
             self.assertIn("Remove the red rectangle", body["prompt"])
 
     def test_seedream_red_box_is_bounded_and_deterministic(self) -> None:

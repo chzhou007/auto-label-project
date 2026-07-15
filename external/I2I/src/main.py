@@ -362,7 +362,12 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
                 cfg.seedream_mode,
             )
             if not seedream_quality["passes_quality"]:
-                raise RuntimeError(f"Seedream experiment quality failed: {seedream_quality['quality_reason']}")
+                raise RuntimeError(
+                    "Seedream experiment quality failed: "
+                    f"{seedream_quality['quality_reason']} "
+                    f"(outside_change_ratio={seedream_quality.get('outside_change_ratio')}, "
+                    f"red_box_residual_ratio={seedream_quality.get('red_box_residual_ratio')})"
+                )
         elif cfg.seedream_mode:
             seedream_quality = {
                 "passes_quality": True,
