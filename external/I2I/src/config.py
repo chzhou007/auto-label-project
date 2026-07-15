@@ -30,6 +30,10 @@ class PipelineConfig:
     limit: int | None = None
     workers: int = 1
     skip_existing: bool = False
+    seedream_mode: str | None = None
+    water_reference_dir: str | None = None
+    red_box_max_size: int = 200
+    red_box_min_size: int = 64
 
 
 @dataclass(frozen=True)

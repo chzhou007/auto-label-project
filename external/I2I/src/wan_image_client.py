@@ -199,19 +199,53 @@ def _is_seedream_reference_generation_endpoint(endpoint: str) -> bool:
     return normalized.endswith("/images/generations") or "/images/generations" in normalized
 
 
+VALID_SEEDREAM_EXPERIMENT_MODES = {"single_image_edit", "boxed_fusion"}
+
+
 def _allow_seedream_reference_generation_debug() -> bool:
     return _truthy_env("SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG")
 
 
-def validate_seedream_local_edit_capability(endpoint: str, *, dry_run: bool = False) -> None:
+def validate_seedream_local_edit_capability(
+    endpoint: str,
+    *,
+    dry_run: bool = False,
+    seedream_mode: str | None = None,
+) -> None:
     if dry_run:
+        return
+    if seedream_mode in VALID_SEEDREAM_EXPERIMENT_MODES:
         return
     if _is_seedream_reference_generation_endpoint(endpoint) and not _allow_seedream_reference_generation_debug():
         raise RuntimeError(REFERENCE_GENERATION_ERROR)
 
 
-def _seedream_prompt(prompt: str, bbox: tuple[int, int, int, int]) -> str:
+def _seedream_prompt(
+    prompt: str,
+    bbox: tuple[int, int, int, int],
+    *,
+    seedream_mode: str | None = None,
+    reference_count: int = 1,
+) -> str:
     x1, y1, x2, y2 = bbox
+    if seedream_mode == "single_image_edit":
+        return (
+            f"{prompt}\n\n"
+            "Seedream experiment mode: single_image_edit. Use the input image as the source image. "
+            f"Add one small realistic early-stage water leak near pixel bbox [x1={x1}, y1={y1}, x2={x2}, y2={y2}] "
+            "or inside the selected grid. Return a full image with the same scene, camera, timestamp, equipment, "
+            "background, and layout. Do not create a new room, do not crop, do not add an inset image, and keep all "
+            "content outside the target region visually unchanged."
+        )
+    if seedream_mode == "boxed_fusion":
+        return (
+            f"{prompt}\n\n"
+            "Seedream experiment mode: boxed_fusion. The first input image is the industrial source image with a red "
+            "rectangle guide. The second input image is a water-stain reference. Fuse only the water-stain appearance "
+            f"from the reference image into the red rectangle region [x1={x1}, y1={y1}, x2={x2}, y2={y2}] on the "
+            "source image. Remove the red rectangle completely in the final image. Return one full-size source-scene "
+            "image, not a crop and not an inset. Preserve all pixels outside the rectangle as much as possible."
+        )
     return (
         f"{prompt}\n\n"
         "Edit region constraint: use the clean input image as the source image and edit only inside "
@@ -221,14 +255,14 @@ def _seedream_prompt(prompt: str, bbox: tuple[int, int, int, int]) -> str:
     )
 
 
-def _with_seedream_image_input(payload: dict[str, Any], image_data_url: str) -> dict[str, Any]:
+def _with_seedream_image_input(payload: dict[str, Any], image_data_urls: list[str]) -> dict[str, Any]:
     field = os.getenv("SEEDREAM_IMAGE_FIELD", "image_urls").strip() or "image_urls"
     if field == "image":
-        payload["image"] = image_data_url
+        payload["image"] = image_data_urls[0]
     elif field == "image_url":
-        payload["image_url"] = image_data_url
+        payload["image_url"] = image_data_urls[0]
     else:
-        payload["image_urls"] = [image_data_url]
+        payload["image_urls"] = image_data_urls
     return payload
 
 
@@ -297,6 +331,8 @@ class WanImageClient:
         prompt: str,
         negative_prompt: str,
         bbox: tuple[int, int, int, int],
+        seedream_mode: str | None = None,
+        seedream_reference_paths: list[str] | None = None,
     ) -> tuple[str, dict[str, Any], dict[str, Any], bool]:
         endpoint = _service_endpoint(self.config)
         full_prompt = prompt
@@ -304,7 +340,14 @@ class WanImageClient:
             full_prompt = f"{prompt}\n\nNegative prompt: {negative_prompt}"
 
         if _is_seedream_provider(self.config, endpoint, self.model):
-            seedream_prompt = _seedream_prompt(full_prompt, bbox)
+            reference_paths = [str(path) for path in (seedream_reference_paths or []) if str(path)]
+            request_image_paths = [image_path, *reference_paths]
+            seedream_prompt = _seedream_prompt(
+                full_prompt,
+                bbox,
+                seedream_mode=seedream_mode,
+                reference_count=len(request_image_paths),
+            )
             request_payload: dict[str, Any] = {
                 "model": self.model,
                 "prompt": seedream_prompt,
@@ -315,15 +358,21 @@ class WanImageClient:
             if response_format:
                 request_payload["response_format"] = response_format
             request_payload["size"] = _seedream_size_for_image(image_path)
-            request_payload = _with_seedream_image_input(request_payload, image_to_data_url(image_path))
+            request_payload = _with_seedream_image_input(
+                request_payload,
+                [image_to_data_url(path) for path in request_image_paths],
+            )
 
             request_log_payload = dict(request_payload)
             for image_key in ("image", "image_url"):
                 if image_key in request_log_payload:
                     request_log_payload[image_key] = image_path
             if "image_urls" in request_log_payload:
-                request_log_payload["image_urls"] = [image_path]
+                request_log_payload["image_urls"] = request_image_paths
             request_log_payload["edit_bbox"] = list(bbox)
+            if seedream_mode:
+                request_log_payload["seedream_mode"] = seedream_mode
+                request_log_payload["experimental_seedream"] = True
             return endpoint, request_payload, request_log_payload, True
 
         request_payload = {
@@ -378,6 +427,8 @@ class WanImageClient:
         anomaly_type: str,
         request_log_path: str | None = None,
         response_log_path: str | None = None,
+        seedream_mode: str | None = None,
+        seedream_reference_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         endpoint = _service_endpoint(self.config)
         is_seedream = _is_seedream_provider(self.config, endpoint, self.model)
@@ -387,7 +438,12 @@ class WanImageClient:
         request_log_payload: dict[str, Any]
         if not (is_seedream and not self.dry_run):
             endpoint, request_payload, request_log_payload, is_seedream = self._build_request_payloads(
-                image_path, prompt, negative_prompt, bbox
+                image_path,
+                prompt,
+                negative_prompt,
+                bbox,
+                seedream_mode=seedream_mode,
+                seedream_reference_paths=seedream_reference_paths,
             )
         else:
             request_payload = {}
@@ -409,7 +465,7 @@ class WanImageClient:
             raise RuntimeError("image generation API key is required unless --dry-run is used; set ARK_API_KEY")
 
         if is_seedream:
-            validate_seedream_local_edit_capability(endpoint, dry_run=self.dry_run)
+            validate_seedream_local_edit_capability(endpoint, dry_run=self.dry_run, seedream_mode=seedream_mode)
 
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
@@ -421,7 +477,7 @@ class WanImageClient:
         request_bbox = bbox
         compose_seedream_crop = False
         seedream_crop_bbox: tuple[int, int, int, int] | None = None
-        if is_seedream:
+        if is_seedream and seedream_mode not in VALID_SEEDREAM_EXPERIMENT_MODES:
             temp_dir_obj = tempfile.TemporaryDirectory(prefix="seedream_i2i_")
             temp_dir = Path(temp_dir_obj.name)
             with Image.open(image_path) as original_image:
@@ -432,12 +488,28 @@ class WanImageClient:
             crop.save(request_image_path, quality=95)
             request_bbox = (0, 0, crop.size[0], crop.size[1])
             endpoint, request_payload, request_log_payload, is_seedream = self._build_request_payloads(
-                request_image_path, prompt, negative_prompt, request_bbox
+                request_image_path,
+                prompt,
+                negative_prompt,
+                request_bbox,
+                seedream_mode=seedream_mode,
+                seedream_reference_paths=seedream_reference_paths,
             )
             request_log_payload["source_image_path"] = image_path
             request_log_payload["source_edit_bbox"] = list(seedream_crop_bbox)
             request_log_payload["seedream_local_crop_mode"] = True
             compose_seedream_crop = True
+        elif is_seedream:
+            endpoint, request_payload, request_log_payload, is_seedream = self._build_request_payloads(
+                request_image_path,
+                prompt,
+                negative_prompt,
+                request_bbox,
+                seedream_mode=seedream_mode,
+                seedream_reference_paths=seedream_reference_paths,
+            )
+            request_log_payload["source_image_path"] = image_path
+            request_log_payload["seedream_full_image_experiment"] = True
 
         if request_log_path:
             write_json(

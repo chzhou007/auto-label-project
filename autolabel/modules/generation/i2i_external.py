@@ -91,6 +91,18 @@ class ExternalI2IGenerationModule:
 
     def build_extra_cli_args(self, runtime: dict[str, Any]) -> list[str]:
         args = [str(arg) for arg in runtime.get("extra_cli_args", []) if str(arg)]
+        seedream_cfg = self.pipeline_config.get("generation", {}).get("seedream", {})
+        if isinstance(seedream_cfg, dict):
+            mode = str(seedream_cfg.get("mode") or "").strip()
+            if mode:
+                args.extend(["--seedream-mode", mode])
+                water_reference_dir = str(seedream_cfg.get("water_reference_dir") or "").strip()
+                if water_reference_dir:
+                    args.extend(["--water-reference-dir", water_reference_dir])
+                if seedream_cfg.get("red_box_max_size") not in (None, ""):
+                    args.extend(["--red-box-max-size", str(int(seedream_cfg["red_box_max_size"]))])
+                if seedream_cfg.get("red_box_min_size") not in (None, ""):
+                    args.extend(["--red-box-min-size", str(int(seedream_cfg["red_box_min_size"]))])
         if self.pass_localizer_cli_args():
             args.extend(str(arg) for arg in runtime.get("localizer_cli_args", []) if str(arg))
         return args

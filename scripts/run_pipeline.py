@@ -37,6 +37,10 @@ def main() -> int:
     parser.add_argument("--generation-vlm-model-key", default=None)
     parser.add_argument("--generation-image-model-key", default=None)
     parser.add_argument("--generation-workers", type=int, default=None)
+    parser.add_argument("--generation-seedream-mode", choices=["single_image_edit", "boxed_fusion"], default=None)
+    parser.add_argument("--generation-water-reference-dir", default=None)
+    parser.add_argument("--generation-red-box-max-size", type=int, default=None)
+    parser.add_argument("--generation-red-box-min-size", type=int, default=None)
     parser.add_argument("--detector-config", default=None)
     parser.add_argument("--dry-run-generation", action="store_true")
     parser.add_argument("--skip-existing-generation", action="store_true")
@@ -59,6 +63,10 @@ def main() -> int:
         vlm_model_key=args.generation_vlm_model_key,
         image_model_key=args.generation_image_model_key,
         workers=args.generation_workers,
+        seedream_mode=args.generation_seedream_mode,
+        water_reference_dir=args.generation_water_reference_dir,
+        red_box_max_size=args.generation_red_box_max_size,
+        red_box_min_size=args.generation_red_box_min_size,
     )
     if "generation" in args.branches and config.get("generation", {}).get("enabled", True):
         code = run_generation_branch(

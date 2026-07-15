@@ -561,6 +561,179 @@ class ContractTests(unittest.TestCase):
                     anomaly_type="water_leak",
                 )
 
+    def test_seedream_single_image_experiment_uses_one_full_image_input(self) -> None:
+        from PIL import Image
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from config import ModelServiceConfig
+            from wan_image_client import WanImageClient
+        finally:
+            sys.path.remove(str(src_dir))
+
+        class FakeResponse:
+            ok = True
+            status_code = 200
+
+            def json(self):
+                return {"data": [{"url": "https://example.invalid/generated.png"}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original_path = root / "original.jpg"
+            output_path = root / "generated.png"
+            request_log_path = root / "request.json"
+            Image.new("RGB", (100, 80), (70, 80, 90)).save(original_path)
+
+            def fake_download(_value, target):
+                Image.new("RGB", (100, 80), (90, 100, 110)).save(target)
+
+            client = WanImageClient(
+                "doubao-seedream-5.0-lite",
+                ModelServiceConfig(
+                    api_key="test-key",
+                    provider="volcengine_ark",
+                    endpoint="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations",
+                    api_key_env="ARK_API_KEY",
+                    endpoint_env="SEEDREAM_BASE_URL",
+                ),
+            )
+
+            with (
+                patch.dict("os.environ", {"SEEDREAM_SIZE": "2k"}, clear=False),
+                patch("wan_image_client.requests.post", return_value=FakeResponse()),
+                patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
+            ):
+                client.edit_image_with_wan(
+                    image_path=str(original_path),
+                    prompt="make a small water leak",
+                    negative_prompt="",
+                    bbox=(20, 10, 60, 50),
+                    output_path=str(output_path),
+                    anomaly_type="water_leak",
+                    request_log_path=str(request_log_path),
+                    seedream_mode="single_image_edit",
+                )
+
+            body = read_json(request_log_path)["body"]
+            self.assertEqual(body["seedream_mode"], "single_image_edit")
+            self.assertTrue(body["experimental_seedream"])
+            self.assertEqual(body["n"], 1)
+            self.assertEqual(body["image_urls"], [str(original_path)])
+            self.assertNotIn("seedream_local_crop_mode", body)
+
+    def test_seedream_boxed_fusion_uses_guide_and_reference_inputs(self) -> None:
+        from PIL import Image
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from config import ModelServiceConfig
+            from wan_image_client import WanImageClient
+        finally:
+            sys.path.remove(str(src_dir))
+
+        class FakeResponse:
+            ok = True
+            status_code = 200
+
+            def json(self):
+                return {"data": [{"url": "https://example.invalid/generated.png"}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            guide_path = root / "guide.jpg"
+            reference_path = root / "water_ref.png"
+            request_log_path = root / "request.json"
+            Image.new("RGB", (100, 80), (70, 80, 90)).save(guide_path)
+            Image.new("RGB", (40, 30), (160, 180, 190)).save(reference_path)
+
+            def fake_download(_value, target):
+                Image.new("RGB", (100, 80), (90, 100, 110)).save(target)
+
+            client = WanImageClient(
+                "doubao-seedream-5.0-lite",
+                ModelServiceConfig(
+                    api_key="test-key",
+                    provider="volcengine_ark",
+                    endpoint="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations",
+                    api_key_env="ARK_API_KEY",
+                    endpoint_env="SEEDREAM_BASE_URL",
+                ),
+            )
+
+            with (
+                patch.dict("os.environ", {"SEEDREAM_SIZE": "2k"}, clear=False),
+                patch("wan_image_client.requests.post", return_value=FakeResponse()),
+                patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
+            ):
+                client.edit_image_with_wan(
+                    image_path=str(guide_path),
+                    prompt="fuse a water stain",
+                    negative_prompt="",
+                    bbox=(20, 10, 60, 50),
+                    output_path=str(root / "generated.png"),
+                    anomaly_type="water_leak",
+                    request_log_path=str(request_log_path),
+                    seedream_mode="boxed_fusion",
+                    seedream_reference_paths=[str(reference_path)],
+                )
+
+            body = read_json(request_log_path)["body"]
+            self.assertEqual(body["seedream_mode"], "boxed_fusion")
+            self.assertEqual(body["n"], 1)
+            self.assertEqual(body["image_urls"], [str(guide_path), str(reference_path)])
+            self.assertIn("Remove the red rectangle", body["prompt"])
+
+    def test_seedream_red_box_is_bounded_and_deterministic(self) -> None:
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from main import _choose_seedream_red_box
+        finally:
+            sys.path.remove(str(src_dir))
+
+        grid_bbox = (100, 200, 500, 600)
+        box_a = _choose_seedream_red_box("sample_a", grid_bbox, 64, 200)
+        box_b = _choose_seedream_red_box("sample_a", grid_bbox, 64, 200)
+        self.assertEqual(box_a, box_b)
+        self.assertGreaterEqual(box_a[0], grid_bbox[0])
+        self.assertGreaterEqual(box_a[1], grid_bbox[1])
+        self.assertLessEqual(box_a[2], grid_bbox[2])
+        self.assertLessEqual(box_a[3], grid_bbox[3])
+        self.assertLessEqual(box_a[2] - box_a[0], 200)
+        self.assertLessEqual(box_a[3] - box_a[1], 200)
+
+    def test_seedream_experiment_quality_rejects_red_residual_and_scene_drift(self) -> None:
+        from PIL import Image, ImageDraw
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from main import _validate_seedream_experiment_output
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original_path = root / "original.jpg"
+            red_path = root / "red.jpg"
+            drift_path = root / "drift.jpg"
+            Image.new("RGB", (100, 80), (70, 80, 90)).save(original_path)
+            red_image = Image.new("RGB", (100, 80), (70, 80, 90))
+            ImageDraw.Draw(red_image).rectangle((20, 10, 60, 50), fill=(255, 0, 0))
+            red_image.save(red_path)
+            Image.new("RGB", (100, 80), (220, 220, 220)).save(drift_path)
+
+            red_quality = _validate_seedream_experiment_output(original_path, red_path, (20, 10, 60, 50), "boxed_fusion")
+            drift_quality = _validate_seedream_experiment_output(original_path, drift_path, (20, 10, 60, 50), "single_image_edit")
+
+            self.assertFalse(red_quality["passes_quality"])
+            self.assertIn("seedream_red_box_residual", red_quality["quality_reason"])
+            self.assertFalse(drift_quality["passes_quality"])
+            self.assertIn("seedream_outside_region_change_high", drift_quality["quality_reason"])
+
     def test_seedream_debug_reference_generation_rejects_framed_scene_crop(self) -> None:
         from PIL import Image, ImageDraw
 
@@ -759,6 +932,48 @@ class ContractTests(unittest.TestCase):
                         output_root=root / "out",
                     )
 
+    def test_generation_preflight_rejects_boxed_fusion_without_reference_images(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_root = root / "images"
+            image_root.mkdir()
+            image_path = image_root / "source.jpg"
+            Image.new("RGB", (100, 80), (70, 80, 90)).save(image_path)
+            empty_reference_dir = root / "refs"
+            empty_reference_dir.mkdir()
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_water",
+                        "image_id": "source",
+                        "image_uri": image_path.name,
+                        "anomaly_type": "water_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "anomaly_type", "source_type", "task_mode"],
+            )
+
+            config = load_config(ROOT / "configs" / "autolabel.yaml")
+            config["generation"]["seedream"] = {
+                "mode": "boxed_fusion",
+                "allow_experimental_generation": True,
+                "water_reference_dir": str(empty_reference_dir),
+            }
+            with self.assertRaisesRegex(Exception, "no image files"):
+                run_generation_preflight(
+                    config,
+                    tasks_csv=manifest_path,
+                    image_root=image_root,
+                    output_root=root / "out",
+                    require_credentials=False,
+                )
+
     def test_i2i_dry_run_summary_separates_final_images_from_debug_artifacts(self) -> None:
         from PIL import Image
 
@@ -808,6 +1023,64 @@ class ContractTests(unittest.TestCase):
             self.assertGreaterEqual(summary["debug_artifact_count"], 3)
             self.assertEqual(len(list((output_root / "generated_images").glob("*.png"))), 1)
             self.assertTrue((output_root / "debug" / "grid_previews").exists())
+
+    def test_i2i_seedream_boxed_fusion_dry_run_outputs_one_final_image(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_root = root / "images"
+            reference_root = root / "refs"
+            output_root = root / "out"
+            image_root.mkdir()
+            reference_root.mkdir()
+            image_path = image_root / "source.jpg"
+            reference_path = reference_root / "water_ref.jpg"
+            Image.new("RGB", (160, 120), (80, 80, 80)).save(image_path)
+            Image.new("RGB", (64, 64), (160, 180, 190)).save(reference_path)
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_seedream_dry_run",
+                        "image_id": "source",
+                        "image_uri": image_path.name,
+                        "anomaly_type": "water_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "anomaly_type", "source_type", "task_mode"],
+            )
+
+            cmd = [
+                sys.executable,
+                str(ROOT / "external" / "I2I" / "src" / "main.py"),
+                "--tasks",
+                str(manifest_path),
+                "--image-root",
+                str(image_root),
+                "--output-root",
+                str(output_root),
+                "--dry-run",
+                "--seedream-mode",
+                "boxed_fusion",
+                "--water-reference-dir",
+                str(reference_root),
+                "--limit",
+                "1",
+            ]
+            completed = subprocess.run(cmd, cwd=ROOT / "external" / "I2I", text=True, capture_output=True, check=False)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            summary = read_json(output_root / "logs" / "run_summary.json")
+            self.assertEqual(summary["final_generated_count"], 1)
+            self.assertEqual(summary["model_call_count"], 0)
+            self.assertEqual(summary["model_generated_count"], 0)
+            self.assertEqual(len(list((output_root / "generated_images").glob("*.png"))), 1)
+            self.assertEqual(len(list((output_root / "debug" / "seedream_guides").glob("*.jpg"))), 1)
+            self.assertEqual(len(list((output_root / "debug" / "seedream_references").glob("*.jpg"))), 1)
             self.assertTrue((output_root / "debug" / "crops").exists())
             self.assertTrue((output_root / "debug" / "masks").exists())
 

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
 import logging
+import os
 from pathlib import Path
 import random
 import time
 
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageDraw
 
 from config import I2IServiceConfig, PipelineConfig
 from cropper import crop_anomaly
@@ -25,6 +28,7 @@ from utils import (
     resolve_image_path,
     setup_logging,
     write_json,
+    copy_file,
 )
 from validators import ValidationError, validate_required_fields, validate_task
 from wan_image_client import WanImageClient
@@ -48,6 +52,10 @@ def parse_args() -> PipelineConfig:
     parser.add_argument("--limit", type=int, default=None, help="Process only the first N tasks. Useful for API smoke tests.")
     parser.add_argument("--workers", type=int, default=1, help="Number of concurrent samples to process.")
     parser.add_argument("--skip-existing", action="store_true", help="Skip samples with existing valid metadata JSON.")
+    parser.add_argument("--seedream-mode", choices=["single_image_edit", "boxed_fusion"], default=None)
+    parser.add_argument("--water-reference-dir", default=None)
+    parser.add_argument("--red-box-max-size", type=int, default=200)
+    parser.add_argument("--red-box-min-size", type=int, default=64)
     args = parser.parse_args()
     return PipelineConfig(**vars(args))
 
@@ -124,6 +132,132 @@ def _count_files(path: Path) -> int:
     return sum(1 for item in path.rglob("*") if item.is_file())
 
 
+def _stable_rng(sample_id: str) -> random.Random:
+    digest = hashlib.sha256(sample_id.encode("utf-8")).hexdigest()
+    return random.Random(int(digest[:16], 16))
+
+
+def _choose_seedream_red_box(
+    sample_id: str,
+    grid_bbox: tuple[int, int, int, int],
+    min_size: int,
+    max_size: int,
+) -> tuple[int, int, int, int]:
+    gx1, gy1, gx2, gy2 = grid_bbox
+    grid_width = max(1, gx2 - gx1)
+    grid_height = max(1, gy2 - gy1)
+    upper = max(1, min(int(max_size), grid_width, grid_height))
+    lower = max(1, min(int(min_size), upper))
+    rng = _stable_rng(sample_id)
+    box_width = rng.randint(lower, upper)
+    box_height = rng.randint(lower, upper)
+    x1 = rng.randint(gx1, max(gx1, gx2 - box_width))
+    y1 = rng.randint(gy1, max(gy1, gy2 - box_height))
+    return (x1, y1, x1 + box_width, y1 + box_height)
+
+
+def _draw_seedream_red_box(
+    original_path: str | Path,
+    output_path: str | Path,
+    bbox: tuple[int, int, int, int],
+) -> None:
+    with Image.open(original_path) as image:
+        guide = image.convert("RGB")
+    draw = ImageDraw.Draw(guide)
+    draw.rectangle(bbox, outline=(255, 0, 0), width=4)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    guide.save(output_path, quality=95)
+
+
+def _water_reference_files(reference_dir: str | Path | None) -> list[Path]:
+    if not reference_dir:
+        return []
+    root = Path(reference_dir)
+    if not root.exists() or not root.is_dir():
+        return []
+    allowed = {".jpg", ".jpeg", ".png", ".webp"}
+    return sorted(path for path in root.iterdir() if path.is_file() and path.suffix.lower() in allowed)
+
+
+def _select_water_reference(reference_dir: str | Path | None, sample_id: str) -> Path:
+    candidates = _water_reference_files(reference_dir)
+    if not candidates:
+        raise ValueError(f"boxed_fusion requires water reference images under: {reference_dir}")
+    digest = hashlib.sha256(sample_id.encode("utf-8")).hexdigest()
+    return candidates[int(digest[:8], 16) % len(candidates)]
+
+
+def _red_pixel_ratio(image_path: str | Path, bbox: tuple[int, int, int, int]) -> float:
+    with Image.open(image_path) as image:
+        array = np.asarray(image.convert("RGB"))
+    height, width = array.shape[:2]
+    x1, y1, x2, y2 = bbox
+    x1 = max(0, min(width, x1))
+    x2 = max(0, min(width, x2))
+    y1 = max(0, min(height, y1))
+    y2 = max(0, min(height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    crop = array[y1:y2, x1:x2]
+    red = (crop[:, :, 0] > 180) & (crop[:, :, 1] < 90) & (crop[:, :, 2] < 90)
+    return float(red.mean())
+
+
+def _outside_change_ratio(
+    original_path: str | Path,
+    generated_path: str | Path,
+    allowed_bbox: tuple[int, int, int, int],
+    threshold: float = 30.0,
+) -> float:
+    with Image.open(original_path) as original_image, Image.open(generated_path) as generated_image:
+        original = original_image.convert("RGB")
+        generated = generated_image.convert("RGB")
+        if generated.size != original.size:
+            generated = generated.resize(original.size, Image.Resampling.LANCZOS)
+        original_array = np.asarray(original, dtype=np.int16)
+        generated_array = np.asarray(generated, dtype=np.int16)
+    diff = np.abs(generated_array - original_array).mean(axis=2)
+    height, width = diff.shape
+    x1, y1, x2, y2 = allowed_bbox
+    mask = np.ones((height, width), dtype=bool)
+    x1 = max(0, min(width, x1))
+    x2 = max(0, min(width, x2))
+    y1 = max(0, min(height, y1))
+    y2 = max(0, min(height, y2))
+    if x2 > x1 and y2 > y1:
+        mask[y1:y2, x1:x2] = False
+    if not np.any(mask):
+        return 0.0
+    return float((diff[mask] > threshold).mean())
+
+
+def _validate_seedream_experiment_output(
+    original_path: str | Path,
+    generated_path: str | Path,
+    allowed_bbox: tuple[int, int, int, int],
+    seedream_mode: str | None,
+) -> dict:
+    result = {
+        "passes_quality": True,
+        "quality_reason": None,
+        "outside_change_ratio": _outside_change_ratio(original_path, generated_path, allowed_bbox),
+        "red_box_residual_ratio": 0.0,
+    }
+    max_outside_change = float(str(os.getenv("SEEDREAM_MAX_OUTSIDE_CHANGE_RATIO", "0.20")).strip())
+    reasons = []
+    if result["outside_change_ratio"] > max_outside_change:
+        reasons.append("seedream_outside_region_change_high")
+    if seedream_mode == "boxed_fusion":
+        result["red_box_residual_ratio"] = _red_pixel_ratio(generated_path, allowed_bbox)
+        max_red_ratio = float(str(os.getenv("SEEDREAM_MAX_RED_RESIDUAL_RATIO", "0.02")).strip())
+        if result["red_box_residual_ratio"] > max_red_ratio:
+            reasons.append("seedream_red_box_residual")
+    if reasons:
+        result["passes_quality"] = False
+        result["quality_reason"] = ",".join(reasons)
+    return result
+
+
 def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: QwenVLMClient, wan: WanImageClient) -> bool:
     sample_id = task["sample_id"]
     stale_metadata = dirs["metadata"] / f"{sample_id}.json"
@@ -171,29 +305,79 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
     try:
         grid_bbox = grid_id_to_bbox(grid_id, width, height)
         expanded_bbox = expand_bbox(grid_bbox, width, height, cfg.edit_bbox_expand_ratio)
+        request_image_path = original_path
+        request_bbox = expanded_bbox
+        seedream_reference_paths: list[str] = []
+        seedream_metadata: dict = {}
+        if cfg.seedream_mode == "boxed_fusion":
+            red_box_bbox = _choose_seedream_red_box(
+                sample_id,
+                grid_bbox,
+                cfg.red_box_min_size,
+                cfg.red_box_max_size,
+            )
+            guide_path = dirs["seedream_guides"] / f"{sample_id}_red_box_guide.jpg"
+            _draw_seedream_red_box(original_path, guide_path, red_box_bbox)
+            reference_path = _select_water_reference(cfg.water_reference_dir, sample_id)
+            reference_copy_path = dirs["seedream_references"] / f"{sample_id}_{reference_path.name}"
+            copy_file(reference_path, reference_copy_path)
+            request_image_path = guide_path
+            request_bbox = red_box_bbox
+            seedream_reference_paths = [str(reference_copy_path)]
+            seedream_metadata = {
+                "experimental_seedream": True,
+                "seedream_mode": cfg.seedream_mode,
+                "red_box_bbox": list(red_box_bbox),
+                "red_box_guide_uri": relative_uri(guide_path),
+                "water_reference_uri": relative_uri(reference_copy_path),
+            }
+        elif cfg.seedream_mode == "single_image_edit":
+            seedream_metadata = {
+                "experimental_seedream": True,
+                "seedream_mode": cfg.seedream_mode,
+            }
         wan.edit_image_with_wan(
-            image_path=str(original_path),
+            image_path=str(request_image_path),
             prompt=prompt,
             negative_prompt=NEGATIVE_PROMPT,
-            bbox=expanded_bbox,
+            bbox=request_bbox,
             output_path=str(generated_path),
             anomaly_type=task["anomaly_type"],
             request_log_path=str(dirs["requests"] / f"{sample_id}_wan_request.json"),
             response_log_path=str(dirs["responses"] / f"{sample_id}_wan_response.json"),
+            seedream_mode=cfg.seedream_mode,
+            seedream_reference_paths=seedream_reference_paths,
         )
         gen_width, gen_height = image_size(generated_path)
         if (gen_width, gen_height) != (width, height):
             logger.info("%s generated image size differs; resizing generated image to original dimensions", sample_id)
             _normalize_generated_size(generated_path, (width, height))
             gen_width, gen_height = image_size(generated_path)
+        seedream_quality = None
+        if cfg.seedream_mode and not cfg.dry_run:
+            seedream_quality = _validate_seedream_experiment_output(
+                original_path,
+                generated_path,
+                request_bbox,
+                cfg.seedream_mode,
+            )
+            if not seedream_quality["passes_quality"]:
+                raise RuntimeError(f"Seedream experiment quality failed: {seedream_quality['quality_reason']}")
+        elif cfg.seedream_mode:
+            seedream_quality = {
+                "passes_quality": True,
+                "quality_reason": "dry_run_not_evaluated",
+                "outside_change_ratio": None,
+                "red_box_residual_ratio": None,
+            }
         diff = localize_change_bbox(
             str(original_path),
             str(generated_path),
-            expanded_bbox,
+            request_bbox,
             task["anomaly_type"],
             str(mask_path),
         )
-        refined_bbox = _is_refined_final_bbox(diff["bbox"], expanded_bbox)
+        refined_bbox = _is_refined_final_bbox(diff["bbox"], request_bbox)
         if not refined_bbox:
             logger.warning(
                 "%s diff localization produced coarse bbox matching expanded_edit_bbox; "
@@ -215,7 +399,7 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
             "candidate_grids": candidate_grids,
             "grid_bbox": list(grid_bbox),
             "expanded_edit_bbox": list(expanded_bbox),
-            "prompt_box": list(expanded_bbox),
+            "prompt_box": list(request_bbox),
             "final_bbox_source": (
                 "image_difference_within_selected_grid"
                 if refined_bbox
@@ -225,7 +409,10 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
             "diff_method": diff["diff_method"],
             "mask_uri": relative_uri(mask_path),
             "vlm_selection": vlm_result,
+            **seedream_metadata,
         }
+        if seedream_quality is not None:
+            generation_params["seedream_quality_gate"] = seedream_quality
         sample = build_autolabel_sample(
             task=task,
             generated_image_uri=relative_uri(generated_path),

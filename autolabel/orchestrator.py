@@ -36,6 +36,10 @@ def apply_generation_run_overrides(
     vlm_model_key: str | None = None,
     image_model_key: str | None = None,
     workers: int | None = None,
+    seedream_mode: str | None = None,
+    water_reference_dir: str | None = None,
+    red_box_max_size: int | None = None,
+    red_box_min_size: int | None = None,
 ) -> dict[str, Any]:
     generation_cfg = config.setdefault("generation", {})
     if vlm_model_key:
@@ -44,6 +48,17 @@ def apply_generation_run_overrides(
         generation_cfg["image_model_key"] = image_model_key
     if workers is not None:
         generation_cfg["workers"] = int(workers)
+    if any(value is not None for value in (seedream_mode, water_reference_dir, red_box_max_size, red_box_min_size)):
+        seedream_cfg = generation_cfg.setdefault("seedream", {})
+        if seedream_mode is not None:
+            seedream_cfg["mode"] = seedream_mode
+            seedream_cfg["allow_experimental_generation"] = True
+        if water_reference_dir is not None:
+            seedream_cfg["water_reference_dir"] = str(water_reference_dir)
+        if red_box_max_size is not None:
+            seedream_cfg["red_box_max_size"] = int(red_box_max_size)
+        if red_box_min_size is not None:
+            seedream_cfg["red_box_min_size"] = int(red_box_min_size)
     return config
 
 

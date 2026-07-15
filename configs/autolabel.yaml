@@ -294,6 +294,12 @@ generation:
   workers: 1
   skip_existing: true
   dry_run: false
+  seedream:
+    mode: null
+    water_reference_dir: null
+    red_box_max_size: 200
+    red_box_min_size: 64
+    allow_experimental_generation: false
 
 direct_annotation:
   enabled: true

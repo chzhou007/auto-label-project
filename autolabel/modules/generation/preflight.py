@@ -16,8 +16,9 @@ class GenerationPreflightError(RuntimeError):
 REFERENCE_GENERATION_ERROR = (
     "Seedream image profile points to a reference-generation endpoint "
     "(/images/generations), which is not a production local edit/inpaint API. "
-    "Configure a real Seedream local edit endpoint/parameters, or set "
-    "SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG=1 only for debug experiments."
+    "Configure a real Seedream local edit endpoint/parameters, pass an explicit "
+    "--generation-seedream-mode experiment, or set SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG=1 "
+    "only for debug experiments."
 )
 
 
@@ -42,7 +43,35 @@ def _profile_endpoint(runtime: dict[str, Any]) -> str | None:
     return str(endpoint) if endpoint else None
 
 
-def _validate_seedream_profile(runtime: dict[str, Any], require_credentials: bool) -> None:
+def _seedream_experiment_config(config: dict[str, Any]) -> dict[str, Any]:
+    generation_cfg = config.get("generation", {}) if isinstance(config.get("generation"), dict) else {}
+    seedream_cfg = generation_cfg.get("seedream", {}) if isinstance(generation_cfg.get("seedream"), dict) else {}
+    return seedream_cfg
+
+
+def _seedream_experiment_enabled(seedream_cfg: dict[str, Any]) -> bool:
+    mode = str(seedream_cfg.get("mode") or "").strip()
+    return bool(seedream_cfg.get("allow_experimental_generation")) and mode in {"single_image_edit", "boxed_fusion"}
+
+
+def _validate_seedream_experiment_assets(seedream_cfg: dict[str, Any]) -> None:
+    mode = str(seedream_cfg.get("mode") or "").strip()
+    if mode and mode not in {"single_image_edit", "boxed_fusion"}:
+        raise GenerationPreflightError(f"Unsupported Seedream experiment mode: {mode}")
+    if mode != "boxed_fusion":
+        return
+    reference_dir = seedream_cfg.get("water_reference_dir")
+    if not reference_dir:
+        raise GenerationPreflightError("boxed_fusion requires generation.seedream.water_reference_dir")
+    root = Path(str(reference_dir))
+    if not root.exists() or not root.is_dir():
+        raise GenerationPreflightError(f"Seedream water reference dir not found: {root}")
+    allowed = {".jpg", ".jpeg", ".png", ".webp"}
+    if not any(path.is_file() and path.suffix.lower() in allowed for path in root.iterdir()):
+        raise GenerationPreflightError(f"Seedream water reference dir has no image files: {root}")
+
+
+def _validate_seedream_profile(runtime: dict[str, Any], require_credentials: bool, seedream_cfg: dict[str, Any]) -> None:
     if not require_credentials:
         return
     image_profile = runtime.get("image_profile", {}) if isinstance(runtime.get("image_profile"), dict) else {}
@@ -50,7 +79,12 @@ def _validate_seedream_profile(runtime: dict[str, Any], require_credentials: boo
     model_name = str(runtime.get("image_model_name") or image_profile.get("model_name") or "").lower()
     endpoint = _profile_endpoint(runtime)
     is_seedream = provider in {"volcengine_ark", "ark", "seedream"} or "seedream" in model_name
-    if is_seedream and _is_seedream_reference_generation_endpoint(endpoint) and not _truthy_env("SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG"):
+    if (
+        is_seedream
+        and _is_seedream_reference_generation_endpoint(endpoint)
+        and not _truthy_env("SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG")
+        and not _seedream_experiment_enabled(seedream_cfg)
+    ):
         raise GenerationPreflightError(REFERENCE_GENERATION_ERROR)
 
 
@@ -156,11 +190,13 @@ def run_generation_preflight(
         raise GenerationPreflightError(f"Generation output root must be isolated from image root: {output_path}")
 
     anomaly_types = sorted({row.get("anomaly_type") or "default" for row in rows[:limit]})
+    seedream_cfg = _seedream_experiment_config(config)
+    _validate_seedream_experiment_assets(seedream_cfg)
     runtime_by_anomaly: dict[str, dict[str, Any]] = {}
     credential_checks: list[dict[str, Any]] = []
     for anomaly_type in anomaly_types:
         runtime = resolve_generation_runtime(config, anomaly_type=anomaly_type)
-        _validate_seedream_profile(runtime, require_credentials=require_credentials)
+        _validate_seedream_profile(runtime, require_credentials=require_credentials, seedream_cfg=seedream_cfg)
         runtime_by_anomaly[anomaly_type] = {
             "vlm_model_name": runtime.get("vlm_model_name"),
             "image_model_name": runtime.get("image_model_name"),
