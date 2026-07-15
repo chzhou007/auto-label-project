@@ -226,8 +226,10 @@ def _seedream_prompt(
     *,
     seedream_mode: str | None = None,
     reference_count: int = 1,
+    anomaly_type: str | None = None,
 ) -> str:
     x1, y1, x2, y2 = bbox
+    anomaly_detail = _seedream_anomaly_detail(anomaly_type)
     if seedream_mode == "single_image_edit":
         return (
             "Seedream experiment mode: single_image_edit. This is image-to-image local editing, not text-to-image "
@@ -241,7 +243,7 @@ def _seedream_prompt(
             "bbox, keep pixels visually unchanged as much as possible.\n\n"
             "Return one complete full-frame image matching the input image. The only visible difference should be "
             "the small water leak inside the bbox.\n\n"
-            f"Additional anomaly detail:\n{prompt}"
+            f"{anomaly_detail}"
         )
     if seedream_mode == "boxed_fusion":
         return (
@@ -258,7 +260,7 @@ def _seedream_prompt(
             "Return one complete full-frame image matching the first input image. Do not crop, do not zoom, do not add "
             "an inset image, do not change the scene, and do not replace any equipment. The only visible difference "
             "should be the small water leak inside the red rectangle.\n\n"
-            f"Additional anomaly detail:\n{prompt}"
+            f"{anomaly_detail}"
         )
     return (
         f"{prompt}\n\n"
@@ -266,6 +268,20 @@ def _seedream_prompt(
         f"pixel bbox [x1={x1}, y1={y1}, x2={x2}, y2={y2}]. Keep the camera, background, equipment, "
         "lighting, timestamp, and all content outside this box unchanged. The final anomaly must be a "
         "small realistic early-stage leak located inside this box."
+    )
+
+
+def _seedream_anomaly_detail(anomaly_type: str | None) -> str:
+    if anomaly_type == "water_leak":
+        return (
+            "Target anomaly: clear water leak only. The leak must be subtle, transparent, low contrast, physically "
+            "attached to existing pipe/equipment/floor surfaces, and visible through small droplets, a thin trickle, "
+            "or a small wet reflective stain. Do not create a large spill, spray, steam, foam, colored liquid, oil, "
+            "new equipment, new room, new timestamp, new camera view, or any scene-level change."
+        )
+    return (
+        "Target anomaly: one small realistic industrial anomaly only inside the specified bbox. Keep all non-target "
+        "content unchanged and avoid any scene-level change."
     )
 
 
@@ -347,6 +363,7 @@ class WanImageClient:
         bbox: tuple[int, int, int, int],
         seedream_mode: str | None = None,
         seedream_reference_paths: list[str] | None = None,
+        anomaly_type: str | None = None,
     ) -> tuple[str, dict[str, Any], dict[str, Any], bool]:
         endpoint = _service_endpoint(self.config)
         full_prompt = prompt
@@ -361,6 +378,7 @@ class WanImageClient:
                 bbox,
                 seedream_mode=seedream_mode,
                 reference_count=len(request_image_paths),
+                anomaly_type=anomaly_type,
             )
             request_payload: dict[str, Any] = {
                 "model": self.model,
@@ -458,6 +476,7 @@ class WanImageClient:
                 bbox,
                 seedream_mode=seedream_mode,
                 seedream_reference_paths=seedream_reference_paths,
+                anomaly_type=anomaly_type,
             )
         else:
             request_payload = {}
@@ -508,6 +527,7 @@ class WanImageClient:
                 request_bbox,
                 seedream_mode=seedream_mode,
                 seedream_reference_paths=seedream_reference_paths,
+                anomaly_type=anomaly_type,
             )
             request_log_payload["source_image_path"] = image_path
             request_log_payload["source_edit_bbox"] = list(seedream_crop_bbox)
@@ -521,6 +541,7 @@ class WanImageClient:
                 request_bbox,
                 seedream_mode=seedream_mode,
                 seedream_reference_paths=seedream_reference_paths,
+                anomaly_type=anomaly_type,
             )
             request_log_payload["source_image_path"] = image_path
             request_log_payload["seedream_full_image_experiment"] = True

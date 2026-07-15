@@ -625,6 +625,8 @@ class ContractTests(unittest.TestCase):
             self.assertIn("image-to-image local editing, not text-to-image generation", body["prompt"])
             self.assertIn("Edit only inside pixel bbox", body["prompt"])
             self.assertNotIn("or inside the selected grid", body["prompt"])
+            self.assertNotIn("Additional anomaly detail", body["prompt"])
+            self.assertNotIn("生成一张真实的工业监控异常图像", body["prompt"])
 
     def test_seedream_boxed_fusion_uses_guide_and_reference_inputs(self) -> None:
         from PIL import Image
@@ -691,6 +693,8 @@ class ContractTests(unittest.TestCase):
             self.assertIn("The second image is only a water-stain visual reference", body["prompt"])
             self.assertIn("Do not copy the second image's background", body["prompt"])
             self.assertIn("Remove the red rectangle", body["prompt"])
+            self.assertNotIn("Additional anomaly detail", body["prompt"])
+            self.assertNotIn("生成一张真实的工业监控异常图像", body["prompt"])
 
     def test_seedream_red_box_is_bounded_and_deterministic(self) -> None:
         src_dir = ROOT / "external" / "I2I" / "src"
@@ -757,6 +761,48 @@ class ContractTests(unittest.TestCase):
             self.assertTrue(tone_quality["passes_quality"])
             self.assertFalse(drift_quality["passes_quality"])
             self.assertIn("seedream_outside_region_change_high", drift_quality["quality_reason"])
+
+    def test_i2i_failure_artifacts_copy_failed_generated_image(self) -> None:
+        from PIL import Image
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from main import _failure_artifact_context
+            from utils import ensure_output_dirs, write_json as i2i_write_json
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dirs = ensure_output_dirs(root)
+            sample_id = "sample_failed"
+            generated_path = dirs["generated_images"] / f"{sample_id}.png"
+            request_log_path = dirs["requests"] / f"{sample_id}_wan_request.json"
+            response_log_path = dirs["responses"] / f"{sample_id}_wan_response.json"
+            mask_path = dirs["masks"] / f"{sample_id}_obj_000001_mask.png"
+            crop_path = dirs["crops"] / f"{sample_id}_obj_000001_crop.jpg"
+            Image.new("RGB", (32, 24), (90, 100, 110)).save(generated_path)
+            i2i_write_json(request_log_path, {"request": True})
+            i2i_write_json(response_log_path, {"response": True})
+
+            context = _failure_artifact_context(
+                sample_id,
+                dirs,
+                generated_path,
+                request_log_path,
+                response_log_path,
+                mask_path,
+                crop_path,
+            )
+
+            artifacts = context["failure_artifacts"]
+            failed_image = dirs["failed_generated_images"] / generated_path.name
+            self.assertTrue(failed_image.exists())
+            self.assertIn("debug", artifacts["failed_generated_image_uri"])
+            self.assertIn("generated_images", artifacts["generated_image_uri"])
+            self.assertIn("requests", artifacts["request_log_uri"])
+            self.assertIn("responses", artifacts["response_log_uri"])
 
     def test_seedream_debug_reference_generation_rejects_framed_scene_crop(self) -> None:
         from PIL import Image, ImageDraw

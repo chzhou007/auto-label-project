@@ -45,6 +45,7 @@ def ensure_output_dirs(output_root: str | Path) -> dict[str, Path]:
         "grid_previews": root / "debug" / "grid_previews",
         "crops": root / "debug" / "crops",
         "masks": root / "debug" / "masks",
+        "failed_generated_images": root / "debug" / "failed_generated_images",
         "seedream_guides": root / "debug" / "seedream_guides",
         "seedream_references": root / "debug" / "seedream_references",
         "metadata": root / "metadata",

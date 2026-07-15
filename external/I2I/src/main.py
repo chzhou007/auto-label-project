@@ -81,6 +81,32 @@ def _write_failure(log_dir: Path, sample_id: str, stage: str, error: Exception |
     logger.error("%s failed at %s: %s", sample_id, stage, error)
 
 
+def _failure_artifact_context(
+    sample_id: str,
+    dirs: dict[str, Path],
+    generated_path: Path,
+    request_log_path: Path,
+    response_log_path: Path,
+    mask_path: Path,
+    crop_path: Path,
+) -> dict:
+    artifacts: dict[str, str] = {}
+    if generated_path.exists():
+        failed_image_path = dirs["failed_generated_images"] / generated_path.name
+        copy_file(generated_path, failed_image_path)
+        artifacts["failed_generated_image_uri"] = relative_uri(failed_image_path)
+        artifacts["generated_image_uri"] = relative_uri(generated_path)
+    if request_log_path.exists():
+        artifacts["request_log_uri"] = relative_uri(request_log_path)
+    if response_log_path.exists():
+        artifacts["response_log_uri"] = relative_uri(response_log_path)
+    if mask_path.exists():
+        artifacts["mask_uri"] = relative_uri(mask_path)
+    if crop_path.exists():
+        artifacts["crop_uri"] = relative_uri(crop_path)
+    return {"failure_artifacts": artifacts} if artifacts else {}
+
+
 def _has_valid_metadata(metadata_path: Path) -> bool:
     if not metadata_path.exists():
         return False
@@ -359,6 +385,9 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
     generated_path = dirs["generated_images"] / f"{sample_id}.png"
     mask_path = dirs["masks"] / f"{sample_id}_obj_000001_mask.png"
     crop_path = dirs["crops"] / f"{sample_id}_obj_000001_crop.jpg"
+    request_log_path = dirs["requests"] / f"{sample_id}_wan_request.json"
+    response_log_path = dirs["responses"] / f"{sample_id}_wan_response.json"
+    seedream_quality = None
 
     candidate_grids = _candidate_grids(vlm_result)
     grid_id = str(vlm_result["selected_grid"]).strip().upper()
@@ -403,8 +432,8 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
             bbox=request_bbox,
             output_path=str(generated_path),
             anomaly_type=task["anomaly_type"],
-            request_log_path=str(dirs["requests"] / f"{sample_id}_wan_request.json"),
-            response_log_path=str(dirs["responses"] / f"{sample_id}_wan_response.json"),
+            request_log_path=str(request_log_path),
+            response_log_path=str(response_log_path),
             seedream_mode=cfg.seedream_mode,
             seedream_reference_paths=seedream_reference_paths,
         )
@@ -503,12 +532,28 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
         last_error = exc
         logger.warning("%s generation/localization failed for selected grid %s: %s", sample_id, grid_id, exc)
 
+    failure_context = {
+        "vlm_result": vlm_result,
+        "candidate_grids": candidate_grids,
+        "selected_grid": grid_id,
+        **_failure_artifact_context(
+            sample_id,
+            dirs,
+            generated_path,
+            request_log_path,
+            response_log_path,
+            mask_path,
+            crop_path,
+        ),
+    }
+    if seedream_quality is not None:
+        failure_context["seedream_quality_gate"] = seedream_quality
     _write_failure(
         dirs["logs"],
         sample_id,
         "generation_or_diff",
         last_error or "unknown generation/diff failure",
-        {"vlm_result": vlm_result, "candidate_grids": candidate_grids, "selected_grid": grid_id},
+        failure_context,
     )
     return False
 
