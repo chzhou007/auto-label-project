@@ -622,8 +622,9 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(body["n"], 1)
             self.assertEqual(body["image_urls"], [str(original_path)])
             self.assertNotIn("seedream_local_crop_mode", body)
-            self.assertIn("image-to-image local editing, not text-to-image generation", body["prompt"])
-            self.assertIn("Edit only inside pixel bbox", body["prompt"])
+            self.assertIn("设备间监控原图", body["prompt"])
+            self.assertIn("至少 200*200px", body["prompt"])
+            self.assertIn("不要重新生成新场景", body["prompt"])
             self.assertNotIn("or inside the selected grid", body["prompt"])
             self.assertNotIn("Additional anomaly detail", body["prompt"])
             self.assertNotIn("生成一张真实的工业监控异常图像", body["prompt"])
@@ -689,10 +690,10 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(body["seedream_mode"], "boxed_fusion")
             self.assertEqual(body["n"], 1)
             self.assertEqual(body["image_urls"], [str(guide_path), str(reference_path)])
-            self.assertTrue(body["prompt"].startswith("Seedream experiment mode: boxed_fusion"))
-            self.assertIn("The second image is only a water-stain visual reference", body["prompt"])
-            self.assertIn("Do not copy the second image's background", body["prompt"])
-            self.assertIn("Remove the red rectangle", body["prompt"])
+            self.assertTrue(body["prompt"].startswith("在第一张如图设备间的红框区域内合成设备漏水的水渍"))
+            self.assertIn("第二张图只作为水渍形态", body["prompt"])
+            self.assertIn("需要至少 200*200px", body["prompt"])
+            self.assertIn("最终图片必须去掉红框", body["prompt"])
             self.assertNotIn("Additional anomaly detail", body["prompt"])
             self.assertNotIn("生成一张真实的工业监控异常图像", body["prompt"])
 
@@ -705,15 +706,17 @@ class ContractTests(unittest.TestCase):
             sys.path.remove(str(src_dir))
 
         grid_bbox = (100, 200, 500, 600)
-        box_a = _choose_seedream_red_box("sample_a", grid_bbox, 64, 200)
-        box_b = _choose_seedream_red_box("sample_a", grid_bbox, 64, 200)
+        box_a = _choose_seedream_red_box("sample_a", grid_bbox, 200, 200)
+        box_b = _choose_seedream_red_box("sample_a", grid_bbox, 200, 200)
         self.assertEqual(box_a, box_b)
         self.assertGreaterEqual(box_a[0], grid_bbox[0])
         self.assertGreaterEqual(box_a[1], grid_bbox[1])
         self.assertLessEqual(box_a[2], grid_bbox[2])
         self.assertLessEqual(box_a[3], grid_bbox[3])
-        self.assertLessEqual(box_a[2] - box_a[0], 200)
-        self.assertLessEqual(box_a[3] - box_a[1], 200)
+        self.assertEqual(box_a[2] - box_a[0], 200)
+        self.assertEqual(box_a[3] - box_a[1], 200)
+        water_box = _choose_seedream_red_box("sample_a", grid_bbox, 200, 200, "water_leak")
+        self.assertGreaterEqual(water_box[1], grid_bbox[1] + int((grid_bbox[3] - grid_bbox[1]) * 0.45))
 
     def test_seedream_experiment_quality_rejects_red_residual_and_scene_drift(self) -> None:
         from PIL import Image, ImageDraw
@@ -1105,9 +1108,13 @@ class ContractTests(unittest.TestCase):
             image_root.mkdir()
             reference_root.mkdir()
             image_path = image_root / "source.jpg"
-            reference_path = reference_root / "water_ref.jpg"
+            reference_path = reference_root / "water_ref.png"
             Image.new("RGB", (160, 120), (80, 80, 80)).save(image_path)
-            Image.new("RGB", (64, 64), (160, 180, 190)).save(reference_path)
+            reference = Image.new("RGBA", (64, 64), (160, 180, 190, 0))
+            for x in range(14, 50):
+                for y in range(22, 42):
+                    reference.putpixel((x, y), (45, 55, 58, 210))
+            reference.save(reference_path)
             manifest_path = root / "manifest.csv"
             write_csv(
                 manifest_path,
@@ -1150,7 +1157,7 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(summary["model_generated_count"], 0)
             self.assertEqual(len(list((output_root / "generated_images").glob("*.png"))), 1)
             self.assertEqual(len(list((output_root / "debug" / "seedream_guides").glob("*.jpg"))), 1)
-            self.assertEqual(len(list((output_root / "debug" / "seedream_references").glob("*.jpg"))), 1)
+            self.assertEqual(len(list((output_root / "debug" / "seedream_references").glob("*"))), 1)
             self.assertTrue((output_root / "debug" / "crops").exists())
             self.assertTrue((output_root / "debug" / "masks").exists())
 

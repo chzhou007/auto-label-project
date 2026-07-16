@@ -1137,7 +1137,7 @@ python scripts/run_pipeline.py `
   --generation-seedream-mode boxed_fusion `
   --generation-water-reference-dir $env:WATER_LEAK_REFERENCE_DIR `
   --generation-red-box-max-size 200 `
-  --generation-red-box-min-size 64 `
+  --generation-red-box-min-size 200 `
   --generation-workers 1 `
   --generation-limit 50 `
   --skip-existing-generation
@@ -1152,7 +1152,7 @@ python scripts/run_pipeline.py `
   --generation-seedream-mode boxed_fusion `
   --generation-water-reference-dir $env:WATER_LEAK_REFERENCE_DIR `
   --generation-red-box-max-size 200 `
-  --generation-red-box-min-size 64 `
+  --generation-red-box-min-size 200 `
   --generation-workers 1 `
   --generation-limit 1000 `
   --skip-existing-generation

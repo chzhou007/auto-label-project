@@ -33,7 +33,7 @@ class PipelineConfig:
     seedream_mode: str | None = None
     water_reference_dir: str | None = None
     red_box_max_size: int = 200
-    red_box_min_size: int = 64
+    red_box_min_size: int = 200
 
 
 @dataclass(frozen=True)

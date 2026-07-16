@@ -298,7 +298,7 @@ generation:
     mode: null
     water_reference_dir: null
     red_box_max_size: 200
-    red_box_min_size: 64
+    red_box_min_size: 200
     allow_experimental_generation: false
 
 direct_annotation:

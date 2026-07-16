@@ -55,7 +55,7 @@ def parse_args() -> PipelineConfig:
     parser.add_argument("--seedream-mode", choices=["single_image_edit", "boxed_fusion"], default=None)
     parser.add_argument("--water-reference-dir", default=None)
     parser.add_argument("--red-box-max-size", type=int, default=200)
-    parser.add_argument("--red-box-min-size", type=int, default=64)
+    parser.add_argument("--red-box-min-size", type=int, default=200)
     args = parser.parse_args()
     return PipelineConfig(**vars(args))
 
@@ -168,6 +168,7 @@ def _choose_seedream_red_box(
     grid_bbox: tuple[int, int, int, int],
     min_size: int,
     max_size: int,
+    anomaly_type: str | None = None,
 ) -> tuple[int, int, int, int]:
     gx1, gy1, gx2, gy2 = grid_bbox
     grid_width = max(1, gx2 - gx1)
@@ -178,7 +179,12 @@ def _choose_seedream_red_box(
     box_width = rng.randint(lower, upper)
     box_height = rng.randint(lower, upper)
     x1 = rng.randint(gx1, max(gx1, gx2 - box_width))
-    y1 = rng.randint(gy1, max(gy1, gy2 - box_height))
+    y_min = gy1
+    y_max = max(gy1, gy2 - box_height)
+    if anomaly_type == "water_leak":
+        preferred_y_min = gy1 + int(grid_height * 0.45)
+        y_min = min(preferred_y_min, y_max)
+    y1 = rng.randint(y_min, y_max)
     return (x1, y1, x1 + box_width, y1 + box_height)
 
 
@@ -404,6 +410,7 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
                 grid_bbox,
                 cfg.red_box_min_size,
                 cfg.red_box_max_size,
+                task["anomaly_type"],
             )
             guide_path = dirs["seedream_guides"] / f"{sample_id}_red_box_guide.jpg"
             _draw_seedream_red_box(original_path, guide_path, red_box_bbox)

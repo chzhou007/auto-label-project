@@ -232,34 +232,26 @@ def _seedream_prompt(
     anomaly_detail = _seedream_anomaly_detail(anomaly_type)
     if seedream_mode == "single_image_edit":
         return (
-            "Seedream experiment mode: single_image_edit. This is image-to-image local editing, not text-to-image "
-            "generation. Treat the input image as the only base image and preserve the original scene exactly.\n\n"
-            "Primary instruction: keep the same camera, viewpoint, crop, perspective, room, equipment, timestamp, "
-            "text overlays, lighting, background, and layout. Do not create a new room, do not replace equipment, "
-            "do not change the camera angle, do not stylize, do not zoom, do not crop, and do not add an inset image.\n\n"
-            f"Edit only inside pixel bbox [x1={x1}, y1={y1}, x2={x2}, y2={y2}]. Inside that bbox, add one small, "
-            "realistic, early-stage clear water leak: subtle transparent water droplets, a thin downward trickle, "
-            "or a small wet reflective stain that follows the existing pipe/equipment/floor geometry. Outside this "
-            "bbox, keep pixels visually unchanged as much as possible.\n\n"
-            "Return one complete full-frame image matching the input image. The only visible difference should be "
-            "the small water leak inside the bbox.\n\n"
+            "在如图设备间合成设备漏水的水渍，需要至少 200*200px。\n"
+            "基于输入的设备间监控原图进行图生图局部编辑，不要重新生成新场景。\n"
+            f"请只在像素区域 [x1={x1}, y1={y1}, x2={x2}, y2={y2}] 附近合成设备漏水的水渍，"
+            "表现为清水漏水形成的透明湿痕、水滴、细流和地面反光水迹。\n"
+            "必须保持原图的设备、墙面、地面、管线、时间戳、视角、构图、清晰度和监控画面风格不变；不要改变机房布局，"
+            "不要替换设备，不要生成新的房间，不要裁剪、缩放或加小窗。\n"
+            "输出完整原图尺寸的图片，除了局部漏水水渍外，其余区域应尽量与输入图一致。\n\n"
             f"{anomaly_detail}"
         )
     if seedream_mode == "boxed_fusion":
         return (
-            "Seedream experiment mode: boxed_fusion. This is image-to-image local fusion, not text-to-image "
-            "generation and not scene replacement.\n\n"
-            "Input image rules: the first image is the only base/source scene. The first image contains a red rectangle "
-            "guide. The second image is only a water-stain visual reference. Use only the water stain's texture, "
-            "transparency, highlight pattern, edge shape, and wet-reflection appearance from the second image. Do not "
-            "copy the second image's background, room, camera, equipment, timestamp, composition, or lighting.\n\n"
-            f"Edit only inside the red rectangle / pixel bbox [x1={x1}, y1={y1}, x2={x2}, y2={y2}] on the first "
-            "image. Remove the red rectangle completely in the final image. Inside this bbox, create one small, "
-            "realistic, early-stage clear water leak that conforms to the local pipe/equipment/floor geometry. Outside "
-            "this bbox, preserve the first image visually unchanged.\n\n"
-            "Return one complete full-frame image matching the first input image. Do not crop, do not zoom, do not add "
-            "an inset image, do not change the scene, and do not replace any equipment. The only visible difference "
-            "should be the small water leak inside the red rectangle.\n\n"
+            "在第一张如图设备间的红框区域内合成设备漏水的水渍，需要至少 200*200px。\n"
+            "基于第一张设备间监控原图和第二张水渍参考图进行图生图局部融合，不要重新生成新场景。\n"
+            "第一张图是唯一底图，第二张图只作为水渍形态、透明湿痕、边缘和反光质感参考，不要复制第二张图的背景或场景。\n"
+            f"请在第一张图红框区域/像素区域 [x1={x1}, y1={y1}, x2={x2}, y2={y2}] 合成设备漏水的水渍，"
+            "红框只是位置提示，最终图片必须去掉红框。\n"
+            "水渍应像设备漏水自然形成：透明清水、湿润反光、不规则边缘，可有少量水滴或细流，并贴合原图中的设备、管线或地面结构。\n"
+            "必须保持第一张图的设备、墙面、地面、管线、时间戳、视角、构图、清晰度和监控画面风格不变；不要改变机房布局，"
+            "不要替换设备，不要生成新的房间，不要裁剪、缩放或加小窗。\n"
+            "输出完整原图尺寸的图片，除了红框内漏水水渍外，其余区域应尽量与第一张图一致。\n\n"
             f"{anomaly_detail}"
         )
     return (
@@ -274,10 +266,7 @@ def _seedream_prompt(
 def _seedream_anomaly_detail(anomaly_type: str | None) -> str:
     if anomaly_type == "water_leak":
         return (
-            "Target anomaly: clear water leak only. The leak must be subtle, transparent, low contrast, physically "
-            "attached to existing pipe/equipment/floor surfaces, and visible through small droplets, a thin trickle, "
-            "or a small wet reflective stain. Do not create a large spill, spray, steam, foam, colored liquid, oil, "
-            "new equipment, new room, new timestamp, new camera view, or any scene-level change."
+            "异常目标：仅生成清水漏水水渍。不要生成油污、泡沫、蒸汽、喷射水柱、人员、车辆、新设备、新房间、新时间戳或场景级变化。"
         )
     return (
         "Target anomaly: one small realistic industrial anomaly only inside the specified bbox. Keep all non-target "
