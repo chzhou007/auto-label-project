@@ -697,6 +697,71 @@ class ContractTests(unittest.TestCase):
             self.assertNotIn("Additional anomaly detail", body["prompt"])
             self.assertNotIn("生成一张真实的工业监控异常图像", body["prompt"])
 
+    def test_seedream_boxed_single_edit_uses_only_guide_input(self) -> None:
+        from PIL import Image
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from config import ModelServiceConfig
+            from wan_image_client import WanImageClient
+        finally:
+            sys.path.remove(str(src_dir))
+
+        class FakeResponse:
+            ok = True
+            status_code = 200
+
+            def json(self):
+                return {"data": [{"url": "https://example.invalid/generated.png"}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            guide_path = root / "guide.jpg"
+            reference_path = root / "water_ref.png"
+            request_log_path = root / "request.json"
+            Image.new("RGB", (100, 80), (70, 80, 90)).save(guide_path)
+            Image.new("RGB", (40, 30), (160, 180, 190)).save(reference_path)
+
+            def fake_download(_value, target):
+                Image.new("RGB", (100, 80), (90, 100, 110)).save(target)
+
+            client = WanImageClient(
+                "doubao-seedream-5.0-lite",
+                ModelServiceConfig(
+                    api_key="test-key",
+                    provider="volcengine_ark",
+                    endpoint="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations",
+                    api_key_env="ARK_API_KEY",
+                    endpoint_env="SEEDREAM_BASE_URL",
+                ),
+            )
+
+            with (
+                patch.dict("os.environ", {"SEEDREAM_SIZE": "2k"}, clear=False),
+                patch("wan_image_client.requests.post", return_value=FakeResponse()),
+                patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
+            ):
+                client.edit_image_with_wan(
+                    image_path=str(guide_path),
+                    prompt="add a water stain in the red box",
+                    negative_prompt="",
+                    bbox=(20, 10, 60, 50),
+                    output_path=str(root / "generated.png"),
+                    anomaly_type="water_leak",
+                    request_log_path=str(request_log_path),
+                    seedream_mode="boxed_single_edit",
+                    seedream_reference_paths=[str(reference_path)],
+                )
+
+            body = read_json(request_log_path)["body"]
+            self.assertEqual(body["seedream_mode"], "boxed_single_edit")
+            self.assertEqual(body["n"], 1)
+            self.assertEqual(body["image_urls"], [str(guide_path)])
+            self.assertTrue(body["prompt"].startswith("在如图设备间的红框区域内合成设备漏水的水渍"))
+            self.assertIn("红框只是位置提示", body["prompt"])
+            self.assertNotIn("第二张图只作为水渍形态", body["prompt"])
+
     def test_seedream_red_box_is_bounded_and_deterministic(self) -> None:
         src_dir = ROOT / "external" / "I2I" / "src"
         sys.path.insert(0, str(src_dir))
@@ -717,6 +782,30 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(box_a[3] - box_a[1], 200)
         water_box = _choose_seedream_red_box("sample_a", grid_bbox, 200, 200, "water_leak")
         self.assertGreaterEqual(water_box[1], grid_bbox[1] + int((grid_bbox[3] - grid_bbox[1]) * 0.45))
+
+    def test_seedream_water_leak_box_prefers_low_saturation_floor_area(self) -> None:
+        from PIL import Image, ImageDraw
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from main import _choose_seedream_water_leak_box
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "source.jpg"
+            image = Image.new("RGB", (640, 640), (210, 40, 30))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((100, 400, 300, 620), fill=(150, 150, 145))
+            image.save(image_path)
+
+            box = _choose_seedream_water_leak_box(image_path, "sample_a", (100, 200, 500, 600), 200, 200)
+
+        self.assertLessEqual(box[0], 140)
+        self.assertGreaterEqual(box[1], 380)
+        self.assertEqual(box[2] - box[0], 200)
+        self.assertEqual(box[3] - box[1], 200)
 
     def test_seedream_experiment_quality_rejects_red_residual_and_scene_drift(self) -> None:
         from PIL import Image, ImageDraw

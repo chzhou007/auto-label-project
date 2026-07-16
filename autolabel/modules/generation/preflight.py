@@ -51,12 +51,16 @@ def _seedream_experiment_config(config: dict[str, Any]) -> dict[str, Any]:
 
 def _seedream_experiment_enabled(seedream_cfg: dict[str, Any]) -> bool:
     mode = str(seedream_cfg.get("mode") or "").strip()
-    return bool(seedream_cfg.get("allow_experimental_generation")) and mode in {"single_image_edit", "boxed_fusion"}
+    return bool(seedream_cfg.get("allow_experimental_generation")) and mode in {
+        "single_image_edit",
+        "boxed_single_edit",
+        "boxed_fusion",
+    }
 
 
 def _validate_seedream_experiment_assets(seedream_cfg: dict[str, Any]) -> None:
     mode = str(seedream_cfg.get("mode") or "").strip()
-    if mode and mode not in {"single_image_edit", "boxed_fusion"}:
+    if mode and mode not in {"single_image_edit", "boxed_single_edit", "boxed_fusion"}:
         raise GenerationPreflightError(f"Unsupported Seedream experiment mode: {mode}")
     if mode != "boxed_fusion":
         return

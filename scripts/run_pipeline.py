@@ -37,7 +37,11 @@ def main() -> int:
     parser.add_argument("--generation-vlm-model-key", default=None)
     parser.add_argument("--generation-image-model-key", default=None)
     parser.add_argument("--generation-workers", type=int, default=None)
-    parser.add_argument("--generation-seedream-mode", choices=["single_image_edit", "boxed_fusion"], default=None)
+    parser.add_argument(
+        "--generation-seedream-mode",
+        choices=["single_image_edit", "boxed_single_edit", "boxed_fusion"],
+        default=None,
+    )
     parser.add_argument("--generation-water-reference-dir", default=None)
     parser.add_argument("--generation-red-box-max-size", type=int, default=None)
     parser.add_argument("--generation-red-box-min-size", type=int, default=None)

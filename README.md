@@ -1134,8 +1134,7 @@ python scripts/run_pipeline.py `
   --processed-root data/runs/water_leak_seedream5_calibration `
   --generation-vlm-model-key qwen_grid_selector `
   --generation-image-model-key seedream5_image_editor `
-  --generation-seedream-mode boxed_fusion `
-  --generation-water-reference-dir $env:WATER_LEAK_REFERENCE_DIR `
+  --generation-seedream-mode boxed_single_edit `
   --generation-red-box-max-size 200 `
   --generation-red-box-min-size 200 `
   --generation-workers 1 `
@@ -1149,8 +1148,7 @@ python scripts/run_pipeline.py `
   --processed-root data/runs/water_leak_seedream5_1000 `
   --generation-vlm-model-key qwen_grid_selector `
   --generation-image-model-key seedream5_image_editor `
-  --generation-seedream-mode boxed_fusion `
-  --generation-water-reference-dir $env:WATER_LEAK_REFERENCE_DIR `
+  --generation-seedream-mode boxed_single_edit `
   --generation-red-box-max-size 200 `
   --generation-red-box-min-size 200 `
   --generation-workers 1 `
@@ -1158,19 +1156,22 @@ python scripts/run_pipeline.py `
   --skip-existing-generation
 ```
 
-`boxed_fusion` is the recommended Seedream experiment for water leak generation. It sends two inputs to Seedream: the source image with a deterministic red guide box inside the selected grid, plus one water-stain reference image from `--generation-water-reference-dir`. The final output must be a full source-scene image with the red box removed; generated samples are rejected if the red box remains or if too much content outside the guide box changes.
+`boxed_single_edit` is the recommended Seedream experiment for water leak generation. It sends one input to Seedream: the source image with a deterministic 200x200 red guide box inside the selected grid, biased toward low-saturation floor/equipment-base areas for water leaks. The final output must be a full source-scene image with the red box removed; generated samples are rejected if the red box remains or if too much content outside the guide box changes.
 
-For a single-image baseline without a water reference directory, use:
+For a two-image fusion comparison with a water reference directory, use:
 
 ```powershell
 python scripts/run_pipeline.py `
   --config configs/autolabel.yaml `
   --branches generation,export `
   --manifest data/staging/image_sequence/water_leak_generation_1000.csv `
-  --processed-root data/runs/water_leak_seedream5_single_image_calibration `
+  --processed-root data/runs/water_leak_seedream5_boxed_fusion_calibration `
   --generation-vlm-model-key qwen_grid_selector `
   --generation-image-model-key seedream5_image_editor `
-  --generation-seedream-mode single_image_edit `
+  --generation-seedream-mode boxed_fusion `
+  --generation-water-reference-dir $env:WATER_LEAK_REFERENCE_DIR `
+  --generation-red-box-max-size 200 `
+  --generation-red-box-min-size 200 `
   --generation-workers 1 `
   --generation-limit 50 `
   --skip-existing-generation
@@ -1180,7 +1181,7 @@ The export branch keeps direct samples unchanged, but generated samples are expo
 
 The default config now routes image generation through `seedream5_image_editor`. The explicit `--generation-image-model-key seedream5_image_editor` in the commands above is intentional documentation of the production model, not a required override.
 
-Because `https://ark.cn-beijing.volces.com/api/plan/v3/images/generations` is a reference-generation endpoint rather than a proven local edit/inpaint endpoint, the pipeline rejects it unless you explicitly choose `--generation-seedream-mode single_image_edit` or `--generation-seedream-mode boxed_fusion`. Without that explicit experiment mode, Seedream reference generation is not allowed for production local editing.
+Because `https://ark.cn-beijing.volces.com/api/plan/v3/images/generations` is a reference-generation endpoint rather than a proven local edit/inpaint endpoint, the pipeline rejects it unless you explicitly choose `--generation-seedream-mode single_image_edit`, `--generation-seedream-mode boxed_single_edit`, or `--generation-seedream-mode boxed_fusion`. Without that explicit experiment mode, Seedream reference generation is not allowed for production local editing.
 
 Generation model switching has two separate stages. Both are explicit on purpose:
 

@@ -52,7 +52,7 @@ def parse_args() -> PipelineConfig:
     parser.add_argument("--limit", type=int, default=None, help="Process only the first N tasks. Useful for API smoke tests.")
     parser.add_argument("--workers", type=int, default=1, help="Number of concurrent samples to process.")
     parser.add_argument("--skip-existing", action="store_true", help="Skip samples with existing valid metadata JSON.")
-    parser.add_argument("--seedream-mode", choices=["single_image_edit", "boxed_fusion"], default=None)
+    parser.add_argument("--seedream-mode", choices=["single_image_edit", "boxed_single_edit", "boxed_fusion"], default=None)
     parser.add_argument("--water-reference-dir", default=None)
     parser.add_argument("--red-box-max-size", type=int, default=200)
     parser.add_argument("--red-box-min-size", type=int, default=200)
@@ -186,6 +186,63 @@ def _choose_seedream_red_box(
         y_min = min(preferred_y_min, y_max)
     y1 = rng.randint(y_min, y_max)
     return (x1, y1, x1 + box_width, y1 + box_height)
+
+
+def _choose_seedream_water_leak_box(
+    image_path: str | Path,
+    sample_id: str,
+    grid_bbox: tuple[int, int, int, int],
+    min_size: int,
+    max_size: int,
+) -> tuple[int, int, int, int]:
+    fallback = _choose_seedream_red_box(sample_id, grid_bbox, min_size, max_size, "water_leak")
+    gx1, gy1, gx2, gy2 = grid_bbox
+    grid_width = max(1, gx2 - gx1)
+    grid_height = max(1, gy2 - gy1)
+    upper = max(1, min(int(max_size), grid_width, grid_height))
+    lower = max(1, min(int(min_size), upper))
+    box_size = upper if upper >= lower else lower
+    if grid_width < box_size or grid_height < box_size:
+        return fallback
+
+    try:
+        with Image.open(image_path) as image:
+            rgb = image.convert("RGB")
+    except Exception:
+        return fallback
+
+    x_stop = max(gx1, gx2 - box_size)
+    y_stop = max(gy1, gy2 - box_size)
+    y_start = min(gy1 + int(grid_height * 0.45), y_stop)
+    step = max(8, box_size // 5)
+    best_box = fallback
+    best_score = float("-inf")
+    for y1 in range(y_start, y_stop + 1, step):
+        for x1 in range(gx1, x_stop + 1, step):
+            x2 = x1 + box_size
+            y2 = y1 + box_size
+            crop = np.asarray(rgb.crop((x1, y1, x2, y2)), dtype=np.float32) / 255.0
+            maxc = crop.max(axis=2)
+            minc = crop.min(axis=2)
+            saturation = np.divide(maxc - minc, maxc, out=np.zeros_like(maxc), where=maxc > 0.001)
+            brightness = maxc
+            mean_sat = float(saturation.mean())
+            mean_brightness = float(brightness.mean())
+            red_yellow_green = (
+                ((crop[:, :, 0] > 0.45) & (crop[:, :, 0] > crop[:, :, 1] * 1.15))
+                | ((crop[:, :, 0] > 0.45) & (crop[:, :, 1] > 0.35) & (crop[:, :, 2] < 0.25))
+                | ((crop[:, :, 1] > 0.35) & (crop[:, :, 1] > crop[:, :, 0] * 1.15))
+            )
+            saturated_equipment_ratio = float((red_yellow_green & (saturation > 0.20)).mean())
+            too_dark_ratio = float((brightness < 0.18).mean())
+            y_bias = (y1 - gy1) / max(1, grid_height - box_size)
+            score = (1.8 * (1.0 - mean_sat)) + (0.8 * mean_brightness) + (0.7 * y_bias)
+            score -= 2.5 * saturated_equipment_ratio
+            score -= 0.8 * too_dark_ratio
+            if score > best_score:
+                best_score = score
+                best_box = (x1, y1, x2, y2)
+    return best_box
 
 
 def _draw_seedream_red_box(
@@ -339,7 +396,7 @@ def _validate_seedream_experiment_output(
         and result["outside_structure_change_ratio"] > max_structure_change
     ):
         reasons.append("seedream_outside_region_change_high")
-    if seedream_mode == "boxed_fusion":
+    if seedream_mode in {"boxed_single_edit", "boxed_fusion"}:
         result["red_box_residual_ratio"] = _red_pixel_ratio(generated_path, allowed_bbox)
         max_red_ratio = float(str(os.getenv("SEEDREAM_MAX_RED_RESIDUAL_RATIO", "0.02")).strip())
         if result["red_box_residual_ratio"] > max_red_ratio:
@@ -404,29 +461,39 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
         request_bbox = expanded_bbox
         seedream_reference_paths: list[str] = []
         seedream_metadata: dict = {}
-        if cfg.seedream_mode == "boxed_fusion":
-            red_box_bbox = _choose_seedream_red_box(
-                sample_id,
-                grid_bbox,
-                cfg.red_box_min_size,
-                cfg.red_box_max_size,
-                task["anomaly_type"],
-            )
+        if cfg.seedream_mode in {"boxed_single_edit", "boxed_fusion"}:
+            if task["anomaly_type"] == "water_leak":
+                red_box_bbox = _choose_seedream_water_leak_box(
+                    original_path,
+                    sample_id,
+                    grid_bbox,
+                    cfg.red_box_min_size,
+                    cfg.red_box_max_size,
+                )
+            else:
+                red_box_bbox = _choose_seedream_red_box(
+                    sample_id,
+                    grid_bbox,
+                    cfg.red_box_min_size,
+                    cfg.red_box_max_size,
+                    task["anomaly_type"],
+                )
             guide_path = dirs["seedream_guides"] / f"{sample_id}_red_box_guide.jpg"
             _draw_seedream_red_box(original_path, guide_path, red_box_bbox)
-            reference_path = _select_water_reference(cfg.water_reference_dir, sample_id)
-            reference_copy_path = dirs["seedream_references"] / f"{sample_id}_{reference_path.name}"
-            copy_file(reference_path, reference_copy_path)
             request_image_path = guide_path
             request_bbox = red_box_bbox
-            seedream_reference_paths = [str(reference_copy_path)]
             seedream_metadata = {
                 "experimental_seedream": True,
                 "seedream_mode": cfg.seedream_mode,
                 "red_box_bbox": list(red_box_bbox),
                 "red_box_guide_uri": relative_uri(guide_path),
-                "water_reference_uri": relative_uri(reference_copy_path),
             }
+            if cfg.seedream_mode == "boxed_fusion":
+                reference_path = _select_water_reference(cfg.water_reference_dir, sample_id)
+                reference_copy_path = dirs["seedream_references"] / f"{sample_id}_{reference_path.name}"
+                copy_file(reference_path, reference_copy_path)
+                seedream_reference_paths = [str(reference_copy_path)]
+                seedream_metadata["water_reference_uri"] = relative_uri(reference_copy_path)
         elif cfg.seedream_mode == "single_image_edit":
             seedream_metadata = {
                 "experimental_seedream": True,

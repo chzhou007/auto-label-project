@@ -199,7 +199,7 @@ def _is_seedream_reference_generation_endpoint(endpoint: str) -> bool:
     return normalized.endswith("/images/generations") or "/images/generations" in normalized
 
 
-VALID_SEEDREAM_EXPERIMENT_MODES = {"single_image_edit", "boxed_fusion"}
+VALID_SEEDREAM_EXPERIMENT_MODES = {"single_image_edit", "boxed_single_edit", "boxed_fusion"}
 
 
 def _allow_seedream_reference_generation_debug() -> bool:
@@ -230,6 +230,18 @@ def _seedream_prompt(
 ) -> str:
     x1, y1, x2, y2 = bbox
     anomaly_detail = _seedream_anomaly_detail(anomaly_type)
+    if seedream_mode == "boxed_single_edit":
+        return (
+            "在如图设备间的红框区域内合成设备漏水的水渍，需要至少 200*200px。\n"
+            "基于输入的设备间监控原图进行图生图局部编辑，不要重新生成新场景。\n"
+            f"请只在红框区域/像素区域 [x1={x1}, y1={y1}, x2={x2}, y2={y2}] 合成设备漏水的水渍，"
+            "红框只是位置提示，最终图片必须去掉红框。\n"
+            "水渍应像设备漏水自然形成：透明清水、湿润反光、不规则边缘，可有少量水滴或细流，并贴合原图中的设备、管线或地面结构。\n"
+            "必须保持原图的设备、墙面、地面、管线、时间戳、视角、构图、清晰度和监控画面风格不变；不要改变机房布局，"
+            "不要替换设备，不要生成新的房间，不要裁剪、缩放或加小窗。\n"
+            "输出完整原图尺寸的图片，除了红框内漏水水渍外，其余区域应尽量与输入图一致。\n\n"
+            f"{anomaly_detail}"
+        )
     if seedream_mode == "single_image_edit":
         return (
             "在如图设备间合成设备漏水的水渍，需要至少 200*200px。\n"
@@ -360,7 +372,9 @@ class WanImageClient:
             full_prompt = f"{prompt}\n\nNegative prompt: {negative_prompt}"
 
         if _is_seedream_provider(self.config, endpoint, self.model):
-            reference_paths = [str(path) for path in (seedream_reference_paths or []) if str(path)]
+            reference_paths = [
+                str(path) for path in (seedream_reference_paths or []) if str(path) and seedream_mode == "boxed_fusion"
+            ]
             request_image_paths = [image_path, *reference_paths]
             seedream_prompt = _seedream_prompt(
                 full_prompt,
