@@ -295,8 +295,11 @@ def _with_seedream_image_input(
 
 
 def _seedream_payload_model(model: str, seedream_mode: str | None) -> str:
+    override = os.getenv("SEEDREAM_IMAGE_MODEL", "").strip()
+    if override:
+        return override
     if seedream_mode in {"single_image_edit", "boxed_single_edit"}:
-        return os.getenv("SEEDREAM_SINGLE_IMAGE_MODEL", "doubao-seedream-5-0-pro-260628").strip() or model
+        return os.getenv("SEEDREAM_SINGLE_IMAGE_MODEL", model).strip() or model
     return model
 
 

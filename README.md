@@ -111,7 +111,7 @@ $env:QWEN_GRID_SELECTOR_MODEL="qwen3.6-27b"
 
 # 只有运行 I2I 生成分支时才需要配置生成模型 key：
 $env:ARK_API_KEY="你的 Ark/Seedream Key"
-$env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
+$env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
 ```
 
 如需本地私有配置，可以复制：
@@ -1118,8 +1118,8 @@ Seedream5.0 water leak calibration and production:
 
 ```powershell
 $env:ARK_API_KEY="..."
-$env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
-$env:SEEDREAM_IMAGE_MODEL="doubao-seedream-5-0-lite"
+$env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
+$env:SEEDREAM_IMAGE_MODEL="doubao-seedream-5-0-pro-260628"
 $env:WATER_LEAK_REFERENCE_DIR="D:\datasets\water_leak_refs"
 
 python scripts/prepare_water_leak_manifest.py `
@@ -1184,7 +1184,7 @@ The export branch keeps direct samples unchanged, but generated samples are expo
 
 The default config now routes image generation through `seedream5_image_editor`. The explicit `--generation-image-model-key seedream5_image_editor` in the commands above is intentional documentation of the production model, not a required override.
 
-Because `https://ark.cn-beijing.volces.com/api/plan/v3/images/generations` is a reference-generation endpoint rather than a proven local edit/inpaint endpoint, the pipeline rejects it unless you explicitly choose `--generation-seedream-mode single_image_edit`, `--generation-seedream-mode boxed_single_edit`, or `--generation-seedream-mode boxed_fusion`. Without that explicit experiment mode, Seedream reference generation is not allowed for production local editing.
+Because Seedream image generation is not a proven local edit/inpaint endpoint, the pipeline rejects it unless you explicitly choose `--generation-seedream-mode single_image_edit`, `--generation-seedream-mode boxed_single_edit`, or `--generation-seedream-mode boxed_fusion`. Without that explicit experiment mode, Seedream reference generation is not allowed for production local editing.
 
 Generation model switching has two separate stages. Both are explicit on purpose:
 

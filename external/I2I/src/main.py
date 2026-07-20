@@ -42,7 +42,7 @@ def parse_args() -> PipelineConfig:
     parser.add_argument("--image-root", required=True)
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--vlm-model", default="qwen3.6-27b")
-    parser.add_argument("--image-model", default="doubao-seedream-5-0-lite")
+    parser.add_argument("--image-model", default="doubao-seedream-5-0-pro-260628")
     parser.add_argument("--grid-layout", default="4x4", choices=["4x4"])
     parser.add_argument("--edit-bbox-expand-ratio", type=float, default=0.20)
     parser.add_argument("--crop-expand-ratio", type=float, default=0.10)
