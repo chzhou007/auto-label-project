@@ -274,7 +274,7 @@ def _seedream_image_field(seedream_mode: str | None, image_count: int) -> str:
     if override:
         return override
     if seedream_mode == "boxed_fusion" or image_count > 1:
-        return "images"
+        return "image"
     return "image"
 
 
@@ -286,7 +286,7 @@ def _with_seedream_image_input(
 ) -> dict[str, Any]:
     field = _seedream_image_field(seedream_mode, len(image_data_urls))
     if field in {"image", "image_url"}:
-        payload[field] = image_data_urls[0]
+        payload[field] = image_data_urls if len(image_data_urls) > 1 else image_data_urls[0]
     elif field in {"images", "image_urls"}:
         payload[field] = image_data_urls
     else:
@@ -457,7 +457,9 @@ class WanImageClient:
             request_log_payload = dict(request_payload)
             for image_key in ("image", "image_url"):
                 if image_key in request_log_payload:
-                    request_log_payload[image_key] = image_path
+                    request_log_payload[image_key] = (
+                        request_image_paths if isinstance(request_payload.get(image_key), list) else image_path
+                    )
             for image_key in ("images", "image_urls"):
                 if image_key in request_log_payload:
                     request_log_payload[image_key] = request_image_paths

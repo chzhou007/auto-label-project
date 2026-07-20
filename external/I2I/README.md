@@ -32,18 +32,18 @@ $env:QWEN397B_API_URL="https://deepseek.gds-services.com/v1"
 
 ```powershell
 $env:ARK_API_KEY="your-ark-key"
-$env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
+$env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
 ```
 
 兼容变量：
 
 ```powershell
 $env:SEEDREAM_API_KEY="your-ark-key"
-$env:SEEDREAM_ENDPOINT="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
-$env:ARK_BASE_URL="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
+$env:SEEDREAM_ENDPOINT="https://ark.cn-beijing.volces.com/api/v3"
+$env:ARK_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
 ```
 
-Seedream 输入图字段默认使用 `image_urls`。如果服务端要求单图字段，可覆盖：
+Seedream `/api/v3` 输入图字段默认使用 Ark 兼容的 `image` 字段。`boxed_fusion` 会发送两张图：`image=[source_guide, water_reference]`。仅在测试自定义后端字段时覆盖：
 
 ```powershell
 $env:SEEDREAM_IMAGE_FIELD="image"

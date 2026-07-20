@@ -657,6 +657,12 @@ class ContractTests(unittest.TestCase):
             def fake_download(_value, target):
                 Image.new("RGB", (100, 80), (90, 100, 110)).save(target)
 
+            seedream_payloads = []
+
+            def fake_generate(_endpoint, _api_key, request_payload):
+                seedream_payloads.append(request_payload)
+                return {"data": [{"url": "https://example.invalid/generated.png"}]}
+
             client = WanImageClient(
                 "doubao-seedream-5-0-pro-260628",
                 ModelServiceConfig(
@@ -670,7 +676,7 @@ class ContractTests(unittest.TestCase):
 
             with (
                 patch.dict("os.environ", {"SEEDREAM_SIZE": "2k"}, clear=False),
-                patch("wan_image_client._generate_seedream_with_openai_sdk", return_value={"data": [{"url": "https://example.invalid/generated.png"}]}),
+                patch("wan_image_client._generate_seedream_with_openai_sdk", side_effect=fake_generate),
                 patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
             ):
                 client.edit_image_with_wan(
@@ -689,10 +695,16 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(body["seedream_mode"], "boxed_fusion")
             self.assertEqual(body["n"], 1)
             self.assertEqual(body["model"], "doubao-seedream-5-0-pro-260628")
-            self.assertEqual(body["images"], [str(guide_path), str(reference_path)])
+            self.assertEqual(body["image"], [str(guide_path), str(reference_path)])
+            self.assertNotIn("images", body)
             self.assertIn("200x200px", body["prompt"])
             self.assertNotIn("Additional anomaly detail", body["prompt"])
             self.assertNotIn("生成一张真实的工业监控异常图像", body["prompt"])
+            self.assertEqual(len(seedream_payloads), 1)
+            self.assertEqual(len(seedream_payloads[0]["image"]), 2)
+            self.assertTrue(seedream_payloads[0]["image"][0].startswith("data:image/jpeg;base64,"))
+            self.assertTrue(seedream_payloads[0]["image"][1].startswith("data:image/png;base64,"))
+            self.assertNotIn("images", seedream_payloads[0])
 
     def test_seedream_boxed_single_edit_uses_only_guide_input(self) -> None:
         from PIL import Image

@@ -1158,7 +1158,7 @@ python scripts/run_pipeline.py `
   --skip-existing-generation
 ```
 
-`boxed_fusion` is the recommended Seedream experiment for water leak generation. It sends two inputs to Seedream using the Ark `images` field: the source image with a deterministic 200x200 red guide box inside the selected grid, plus one water-stain reference image from `--generation-water-reference-dir`. The prompt is intentionally short: ask Seedream to fuse the two images and generate a natural water leak stain on the equipment-room floor. Generated samples are rejected if too much content outside the guide box changes.
+`boxed_fusion` is the recommended Seedream experiment for water leak generation. It sends two inputs to Seedream using the Ark `image` array field: the source image with a deterministic 200x200 red guide box inside the selected grid, plus one water-stain reference image from `--generation-water-reference-dir`. The prompt is intentionally short: ask Seedream to fuse the two images and generate a natural water leak stain on the equipment-room floor. Generated samples are rejected if too much content outside the guide box changes.
 
 For a single-image coordinate edit comparison, use:
 
