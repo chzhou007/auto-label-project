@@ -11,7 +11,7 @@ DEFAULT_QWEN_API_URL = "https://deepseek.gds-services.com/v1"
 DEFAULT_DASHSCOPE_GENERATION_ENDPOINT = (
     "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 )
-DEFAULT_SEEDREAM_GENERATION_ENDPOINT = "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
+DEFAULT_SEEDREAM_GENERATION_ENDPOINT = "https://ark.cn-beijing.volces.com/api/v3"
 
 
 @dataclass(frozen=True)

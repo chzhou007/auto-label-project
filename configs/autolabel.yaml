@@ -176,7 +176,7 @@ models:
         endpoint_env_aliases:
           - SEEDREAM_ENDPOINT
           - ARK_BASE_URL
-        endpoint: ${SEEDREAM_BASE_URL:-https://ark.cn-beijing.volces.com/api/plan/v3/images/generations}
+        endpoint: ${SEEDREAM_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
 
       custom_i2i_generator:
         provider: custom

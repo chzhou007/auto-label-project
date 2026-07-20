@@ -183,6 +183,19 @@ def _service_endpoint(config: ModelServiceConfig | DashScopeConfig) -> str:
     return str(endpoint)
 
 
+def _seedream_openai_base_url(endpoint: str) -> str:
+    override = os.getenv("SEEDREAM_OPENAI_BASE_URL", "").strip()
+    if override:
+        return override.rstrip("/")
+    normalized = endpoint.rstrip("/") or "https://ark.cn-beijing.volces.com/api/v3"
+    suffix = "/images/generations"
+    if normalized.endswith(suffix):
+        normalized = normalized[: -len(suffix)]
+    if normalized.endswith("/api/plan/v3"):
+        normalized = normalized[: -len("/api/plan/v3")] + "/api/v3"
+    return normalized
+
+
 def _is_seedream_provider(config: ModelServiceConfig | DashScopeConfig, endpoint: str, model: str) -> bool:
     provider = str(getattr(config, "provider", "") or "").lower()
     if provider in {"volcengine_ark", "ark", "seedream"}:
@@ -287,6 +300,51 @@ def _seedream_payload_model(model: str, seedream_mode: str | None) -> str:
     return model
 
 
+def _response_to_dict(response: Any) -> dict[str, Any]:
+    if isinstance(response, dict):
+        return response
+    if hasattr(response, "model_dump"):
+        return response.model_dump()
+    if hasattr(response, "dict"):
+        return response.dict()
+    data = getattr(response, "data", None)
+    if data is not None:
+        items = []
+        for item in data:
+            if hasattr(item, "model_dump"):
+                items.append(item.model_dump())
+            elif hasattr(item, "dict"):
+                items.append(item.dict())
+            else:
+                items.append({key: getattr(item, key) for key in ("url", "b64_json") if getattr(item, key, None)})
+        return {"data": items}
+    raise TypeError(f"unsupported image generation response type: {type(response)!r}")
+
+
+def _generate_seedream_with_openai_sdk(endpoint: str, api_key: str, request_payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from openai import OpenAI
+    except Exception as exc:
+        raise RuntimeError("openai is required for Seedream image generation.") from exc
+
+    payload = dict(request_payload)
+    model = str(payload.pop("model"))
+    prompt = str(payload.pop("prompt"))
+    size = str(payload.pop("size", DEFAULT_SEEDREAM_SIZE))
+    n = int(payload.pop("n", 1))
+    response_format = str(payload.pop("response_format", os.getenv("SEEDREAM_RESPONSE_FORMAT", "url")))
+    client = OpenAI(base_url=_seedream_openai_base_url(endpoint), api_key=api_key)
+    response = client.images.generate(
+        model=model,
+        prompt=prompt,
+        size=size,
+        n=n,
+        response_format=response_format,
+        extra_body=payload,
+    )
+    return _response_to_dict(response)
+
+
 def _seedream_size_from_env() -> str | None:
     size = os.getenv("SEEDREAM_SIZE", "").strip()
     if not size:
@@ -385,9 +443,7 @@ class WanImageClient:
                 "output_format": os.getenv("SEEDREAM_OUTPUT_FORMAT", "png"),
                 "watermark": False,
             }
-            response_format = os.getenv("SEEDREAM_RESPONSE_FORMAT")
-            if response_format:
-                request_payload["response_format"] = response_format
+            request_payload["response_format"] = os.getenv("SEEDREAM_RESPONSE_FORMAT", "url")
             request_payload["size"] = _seedream_size_for_image(image_path)
             request_payload = _with_seedream_image_input(
                 request_payload,
@@ -559,16 +615,18 @@ class WanImageClient:
             )
         try:
             self.model_call_count += 1
-            response = requests.post(endpoint, headers=headers, json=request_payload, timeout=180)
-            raw: dict[str, Any]
-            try:
-                raw = response.json()
-            except Exception:
-                raw = {"status_code": response.status_code, "text": response.text}
-            if not response.ok:
-                if response_log_path:
-                    write_json(response_log_path, raw)
-                raise RuntimeError(f"image generation request failed: HTTP {response.status_code}")
+            if is_seedream:
+                raw = _generate_seedream_with_openai_sdk(endpoint, self.config.api_key, request_payload)
+            else:
+                response = requests.post(endpoint, headers=headers, json=request_payload, timeout=180)
+                try:
+                    raw = response.json()
+                except Exception:
+                    raw = {"status_code": response.status_code, "text": response.text}
+                if not response.ok:
+                    if response_log_path:
+                        write_json(response_log_path, raw)
+                    raise RuntimeError(f"image generation request failed: HTTP {response.status_code}")
 
             final_response = self._resolve_async_if_needed(raw, headers, is_seedream)
             image_value = _extract_image_url_or_base64(final_response)

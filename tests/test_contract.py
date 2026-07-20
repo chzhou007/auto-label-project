@@ -292,7 +292,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(generation["image_profile"]["api_key_env"], "ARK_API_KEY")
         self.assertEqual(
             generation["image_profile"]["endpoint"],
-            "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations",
+            "https://ark.cn-beijing.volces.com/api/v3",
         )
 
     def test_generation_run_overrides_can_switch_vlm_and_image_models(self) -> None:
@@ -492,7 +492,7 @@ class ContractTests(unittest.TestCase):
 
             with (
                 patch.dict("os.environ", {"SEEDREAM_SIZE": "auto", "SEEDREAM_N": "4", "SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG": "1"}),
-                patch("wan_image_client.requests.post", return_value=FakeResponse()),
+                patch("wan_image_client._generate_seedream_with_openai_sdk", return_value={"data": [{"url": "https://example.invalid/generated.png"}]}),
                 patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
             ):
                 client.edit_image_with_wan(
@@ -602,7 +602,7 @@ class ContractTests(unittest.TestCase):
 
             with (
                 patch.dict("os.environ", {"SEEDREAM_SIZE": "2k"}, clear=False),
-                patch("wan_image_client.requests.post", return_value=FakeResponse()),
+                patch("wan_image_client._generate_seedream_with_openai_sdk", return_value={"data": [{"url": "https://example.invalid/generated.png"}]}),
                 patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
             ):
                 client.edit_image_with_wan(
@@ -670,7 +670,7 @@ class ContractTests(unittest.TestCase):
 
             with (
                 patch.dict("os.environ", {"SEEDREAM_SIZE": "2k"}, clear=False),
-                patch("wan_image_client.requests.post", return_value=FakeResponse()),
+                patch("wan_image_client._generate_seedream_with_openai_sdk", return_value={"data": [{"url": "https://example.invalid/generated.png"}]}),
                 patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
             ):
                 client.edit_image_with_wan(
@@ -736,7 +736,7 @@ class ContractTests(unittest.TestCase):
 
             with (
                 patch.dict("os.environ", {"SEEDREAM_SIZE": "2k"}, clear=False),
-                patch("wan_image_client.requests.post", return_value=FakeResponse()),
+                patch("wan_image_client._generate_seedream_with_openai_sdk", return_value={"data": [{"url": "https://example.invalid/generated.png"}]}),
                 patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
             ):
                 client.edit_image_with_wan(
@@ -936,7 +936,7 @@ class ContractTests(unittest.TestCase):
 
             with (
                 patch.dict("os.environ", {"SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG": "1"}),
-                patch("wan_image_client.requests.post", return_value=FakeResponse()),
+                patch("wan_image_client._generate_seedream_with_openai_sdk", return_value={"data": [{"url": "https://example.invalid/generated.png"}]}),
                 patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
             ):
                 with self.assertRaisesRegex(RuntimeError, "framed full-scene"):
@@ -1004,7 +1004,7 @@ class ContractTests(unittest.TestCase):
 
             with (
                 patch.dict("os.environ", {"SEEDREAM_SIZE": "2k", "SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG": "1"}),
-                patch("wan_image_client.requests.post", return_value=FakeResponse()),
+                patch("wan_image_client._generate_seedream_with_openai_sdk", return_value={"data": [{"url": "https://example.invalid/generated.png"}]}),
                 patch("wan_image_client._download_or_decode_image", side_effect=fake_download),
             ):
                 client.edit_image_with_wan(
@@ -1084,6 +1084,9 @@ class ContractTests(unittest.TestCase):
 
             with patch.dict("os.environ", {"ARK_API_KEY": "ark-test", "QWEN397B_API_KEY": "qwen-test"}, clear=False):
                 config = load_config(ROOT / "configs" / "autolabel.yaml")
+                config["models"]["generation"]["image_generators"]["seedream5_image_editor"][
+                    "endpoint"
+                ] = "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
                 with self.assertRaisesRegex(Exception, "reference-generation endpoint"):
                     run_generation_preflight(
                         config,
