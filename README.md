@@ -1119,7 +1119,7 @@ Seedream5.0 water leak calibration and production:
 ```powershell
 $env:ARK_API_KEY="..."
 $env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
-$env:SEEDREAM_IMAGE_MODEL="doubao-seedream-5.0-lite"
+$env:SEEDREAM_IMAGE_MODEL="doubao-seedream-5-0-lite"
 $env:WATER_LEAK_REFERENCE_DIR="D:\datasets\water_leak_refs"
 
 python scripts/prepare_water_leak_manifest.py `
@@ -1134,7 +1134,8 @@ python scripts/run_pipeline.py `
   --processed-root data/runs/water_leak_seedream5_calibration `
   --generation-vlm-model-key qwen_grid_selector `
   --generation-image-model-key seedream5_image_editor `
-  --generation-seedream-mode boxed_single_edit `
+  --generation-seedream-mode boxed_fusion `
+  --generation-water-reference-dir $env:WATER_LEAK_REFERENCE_DIR `
   --generation-red-box-max-size 200 `
   --generation-red-box-min-size 200 `
   --generation-workers 1 `
@@ -1148,7 +1149,8 @@ python scripts/run_pipeline.py `
   --processed-root data/runs/water_leak_seedream5_1000 `
   --generation-vlm-model-key qwen_grid_selector `
   --generation-image-model-key seedream5_image_editor `
-  --generation-seedream-mode boxed_single_edit `
+  --generation-seedream-mode boxed_fusion `
+  --generation-water-reference-dir $env:WATER_LEAK_REFERENCE_DIR `
   --generation-red-box-max-size 200 `
   --generation-red-box-min-size 200 `
   --generation-workers 1 `
@@ -1156,20 +1158,21 @@ python scripts/run_pipeline.py `
   --skip-existing-generation
 ```
 
-`boxed_single_edit` is the recommended Seedream experiment for water leak generation. It sends one input to Seedream: the source image with a deterministic 200x200 red guide box inside the selected grid, biased toward low-saturation floor/equipment-base areas for water leaks. The final output must be a full source-scene image with the red box removed; generated samples are rejected if the red box remains or if too much content outside the guide box changes.
+`boxed_fusion` is the recommended Seedream experiment for water leak generation. It sends two inputs to Seedream using the Ark `images` field: the source image with a deterministic 200x200 red guide box inside the selected grid, plus one water-stain reference image from `--generation-water-reference-dir`. The prompt is intentionally short: ask Seedream to fuse the two images and generate a natural water leak stain on the equipment-room floor. Generated samples are rejected if too much content outside the guide box changes.
 
-For a two-image fusion comparison with a water reference directory, use:
+For a single-image coordinate edit comparison, use:
 
 ```powershell
+$env:SEEDREAM_SINGLE_IMAGE_MODEL="doubao-seedream-5-0-pro-260628"
+
 python scripts/run_pipeline.py `
   --config configs/autolabel.yaml `
   --branches generation,export `
   --manifest data/staging/image_sequence/water_leak_generation_1000.csv `
-  --processed-root data/runs/water_leak_seedream5_boxed_fusion_calibration `
+  --processed-root data/runs/water_leak_seedream5_boxed_single_calibration `
   --generation-vlm-model-key qwen_grid_selector `
   --generation-image-model-key seedream5_image_editor `
-  --generation-seedream-mode boxed_fusion `
-  --generation-water-reference-dir $env:WATER_LEAK_REFERENCE_DIR `
+  --generation-seedream-mode boxed_single_edit `
   --generation-red-box-max-size 200 `
   --generation-red-box-min-size 200 `
   --generation-workers 1 `

@@ -166,7 +166,7 @@ models:
 
       seedream5_image_editor:
         provider: volcengine_ark
-        model_name: ${SEEDREAM_IMAGE_MODEL:-doubao-seedream-5.0-lite}
+        model_name: ${SEEDREAM_IMAGE_MODEL:-doubao-seedream-5-0-lite}
         model_version: null
         credential_ref: ark_seedream_generation
         api_key_env: ARK_API_KEY

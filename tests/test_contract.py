@@ -227,7 +227,7 @@ class ContractTests(unittest.TestCase):
         preprocess = config["preprocess"]
         direct = config["direct_annotation"]
         self.assertEqual(generation["vlm_model_name"], "qwen3.6-27b")
-        self.assertEqual(generation["image_model_name"], "doubao-seedream-5.0-lite")
+        self.assertEqual(generation["image_model_name"], "doubao-seedream-5-0-lite")
         self.assertIn("model", classification)
         self.assertIn("model_profiles", detector)
         self.assertEqual(classification["model"], "qwen3.6-27b")
@@ -288,7 +288,7 @@ class ContractTests(unittest.TestCase):
         config["generation"]["image_model_key"] = "seedream5_image_editor"
         generation = resolve_generation_runtime(config)
 
-        self.assertEqual(generation["image_model_name"], "doubao-seedream-5.0-lite")
+        self.assertEqual(generation["image_model_name"], "doubao-seedream-5-0-lite")
         self.assertEqual(generation["image_profile"]["api_key_env"], "ARK_API_KEY")
         self.assertEqual(
             generation["image_profile"]["endpoint"],
@@ -317,7 +317,7 @@ class ContractTests(unittest.TestCase):
         runtime = resolve_generation_runtime(config, anomaly_type="water_leak")
 
         self.assertEqual(runtime["vlm_model_name"], "private-vlm-grid")
-        self.assertEqual(runtime["image_model_name"], "doubao-seedream-5.0-lite")
+        self.assertEqual(runtime["image_model_name"], "doubao-seedream-5-0-lite")
         self.assertEqual(config["generation"]["workers"], 3)
 
     def test_generation_runtime_keeps_localizer_cli_args_separate(self) -> None:
@@ -480,7 +480,7 @@ class ContractTests(unittest.TestCase):
                 Image.new("RGB", (256, 256), (220, 235, 245)).save(target)
 
             client = WanImageClient(
-                "doubao-seedream-5.0-lite",
+                "doubao-seedream-5-0-lite",
                 ModelServiceConfig(
                     api_key="test-key",
                     provider="volcengine_ark",
@@ -521,7 +521,7 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(body["edit_bbox"], [0, 0, 40, 40])
             self.assertEqual(body["size"], "1920x1920")
             self.assertEqual(body["n"], 1)
-            self.assertTrue(body["image_urls"][0].endswith("seedream_input_crop.jpg"))
+            self.assertTrue(body["image"].endswith("seedream_input_crop.jpg"))
             response_log = read_json(response_log_path)
             self.assertEqual(response_log["local_edit"]["mode"], "crop_then_paste")
 
@@ -541,7 +541,7 @@ class ContractTests(unittest.TestCase):
             original_path = root / "original.jpg"
             Image.new("RGB", (100, 80), (70, 80, 90)).save(original_path)
             client = WanImageClient(
-                "doubao-seedream-5.0-lite",
+                "doubao-seedream-5-0-lite",
                 ModelServiceConfig(
                     api_key="test-key",
                     provider="volcengine_ark",
@@ -590,7 +590,7 @@ class ContractTests(unittest.TestCase):
                 Image.new("RGB", (100, 80), (90, 100, 110)).save(target)
 
             client = WanImageClient(
-                "doubao-seedream-5.0-lite",
+                "doubao-seedream-5-0-lite",
                 ModelServiceConfig(
                     api_key="test-key",
                     provider="volcengine_ark",
@@ -620,11 +620,10 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(body["seedream_mode"], "single_image_edit")
             self.assertTrue(body["experimental_seedream"])
             self.assertEqual(body["n"], 1)
-            self.assertEqual(body["image_urls"], [str(original_path)])
+            self.assertEqual(body["model"], "doubao-seedream-5-0-pro-260628")
+            self.assertEqual(body["image"], str(original_path))
             self.assertNotIn("seedream_local_crop_mode", body)
-            self.assertIn("设备间监控原图", body["prompt"])
-            self.assertIn("至少 200*200px", body["prompt"])
-            self.assertIn("不要重新生成新场景", body["prompt"])
+            self.assertIn("200x200", body["prompt"])
             self.assertNotIn("or inside the selected grid", body["prompt"])
             self.assertNotIn("Additional anomaly detail", body["prompt"])
             self.assertNotIn("生成一张真实的工业监控异常图像", body["prompt"])
@@ -659,7 +658,7 @@ class ContractTests(unittest.TestCase):
                 Image.new("RGB", (100, 80), (90, 100, 110)).save(target)
 
             client = WanImageClient(
-                "doubao-seedream-5.0-lite",
+                "doubao-seedream-5-0-lite",
                 ModelServiceConfig(
                     api_key="test-key",
                     provider="volcengine_ark",
@@ -689,11 +688,9 @@ class ContractTests(unittest.TestCase):
             body = read_json(request_log_path)["body"]
             self.assertEqual(body["seedream_mode"], "boxed_fusion")
             self.assertEqual(body["n"], 1)
-            self.assertEqual(body["image_urls"], [str(guide_path), str(reference_path)])
-            self.assertTrue(body["prompt"].startswith("在第一张如图设备间的红框区域内合成设备漏水的水渍"))
-            self.assertIn("第二张图只作为水渍形态", body["prompt"])
-            self.assertIn("需要至少 200*200px", body["prompt"])
-            self.assertIn("最终图片必须去掉红框", body["prompt"])
+            self.assertEqual(body["model"], "doubao-seedream-5-0-lite")
+            self.assertEqual(body["images"], [str(guide_path), str(reference_path)])
+            self.assertIn("200x200px", body["prompt"])
             self.assertNotIn("Additional anomaly detail", body["prompt"])
             self.assertNotIn("生成一张真实的工业监控异常图像", body["prompt"])
 
@@ -727,7 +724,7 @@ class ContractTests(unittest.TestCase):
                 Image.new("RGB", (100, 80), (90, 100, 110)).save(target)
 
             client = WanImageClient(
-                "doubao-seedream-5.0-lite",
+                "doubao-seedream-5-0-lite",
                 ModelServiceConfig(
                     api_key="test-key",
                     provider="volcengine_ark",
@@ -757,10 +754,11 @@ class ContractTests(unittest.TestCase):
             body = read_json(request_log_path)["body"]
             self.assertEqual(body["seedream_mode"], "boxed_single_edit")
             self.assertEqual(body["n"], 1)
-            self.assertEqual(body["image_urls"], [str(guide_path)])
-            self.assertTrue(body["prompt"].startswith("在如图设备间的红框区域内合成设备漏水的水渍"))
-            self.assertIn("红框只是位置提示", body["prompt"])
-            self.assertNotIn("第二张图只作为水渍形态", body["prompt"])
+            self.assertEqual(body["model"], "doubao-seedream-5-0-pro-260628")
+            self.assertEqual(body["image"], str(guide_path))
+            self.assertIn("200x200", body["prompt"])
+            self.assertIn("20 10 60 50", body["prompt"])
+            self.assertNotIn("images", body)
 
     def test_seedream_red_box_is_bounded_and_deterministic(self) -> None:
         src_dir = ROOT / "external" / "I2I" / "src"
@@ -926,7 +924,7 @@ class ContractTests(unittest.TestCase):
                 image.save(target)
 
             client = WanImageClient(
-                "doubao-seedream-5.0-lite",
+                "doubao-seedream-5-0-lite",
                 ModelServiceConfig(
                     api_key="test-key",
                     provider="volcengine_ark",
@@ -991,7 +989,7 @@ class ContractTests(unittest.TestCase):
             request_log_path = root / "request.json"
             Image.new("RGB", (100, 80), (70, 80, 90)).save(original_path)
             client = WanImageClient(
-                "doubao-seedream-5.0-lite",
+                "doubao-seedream-5-0-lite",
                 ModelServiceConfig(
                     api_key="test-key",
                     provider="volcengine_ark",
@@ -1038,7 +1036,7 @@ class ContractTests(unittest.TestCase):
             original_path = root / "original.jpg"
             Image.new("RGB", (100, 80), (70, 80, 90)).save(original_path)
             client = WanImageClient(
-                "doubao-seedream-5.0-lite",
+                "doubao-seedream-5-0-lite",
                 ModelServiceConfig(
                     api_key="test-key",
                     provider="volcengine_ark",
@@ -1437,7 +1435,7 @@ class ContractTests(unittest.TestCase):
                 )
 
             self.assertEqual(result.returncode, 0)
-            self.assertEqual(calls[0]["image_model"], "doubao-seedream-5.0-lite")
+            self.assertEqual(calls[0]["image_model"], "doubao-seedream-5-0-lite")
 
     def test_generation_module_passes_vlm_model_to_i2i(self) -> None:
         from autolabel.modules.generation.i2i_external import ExternalI2IGenerationModule
@@ -2022,7 +2020,7 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(report["generation_rows"], 1)
             self.assertEqual(
                 report["runtime_by_anomaly"]["water_leak"]["image_model_name"],
-                "doubao-seedream-5.0-lite",
+                "doubao-seedream-5-0-lite",
             )
 
     def test_labelstudio_percent_box_converts_to_xyxy_pixels(self) -> None:

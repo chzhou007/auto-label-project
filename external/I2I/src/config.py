@@ -20,7 +20,7 @@ class PipelineConfig:
     image_root: str
     output_root: str
     vlm_model: str = "qwen3.6-27b"
-    image_model: str = "doubao-seedream-5.0-lite"
+    image_model: str = "doubao-seedream-5-0-lite"
     grid_layout: str = "4x4"
     edit_bbox_expand_ratio: float = 0.20
     crop_expand_ratio: float = 0.10

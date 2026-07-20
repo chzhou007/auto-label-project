@@ -21,6 +21,7 @@ from utils import cv2_imread, cv2_imwrite, image_to_data_url, redact_headers, wr
 logger = logging.getLogger(__name__)
 
 DEFAULT_SEEDREAM_MIN_PIXELS = 3_686_400
+DEFAULT_SEEDREAM_SIZE = "2K"
 REFERENCE_GENERATION_ERROR = (
     "Seedream endpoint appears to be reference-generation-only and is not allowed for production local editing. "
     "Configure a real Seedream local edit/inpaint endpoint or set SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG=1 for debug-only experiments."
@@ -229,43 +230,12 @@ def _seedream_prompt(
     anomaly_type: str | None = None,
 ) -> str:
     x1, y1, x2, y2 = bbox
-    anomaly_detail = _seedream_anomaly_detail(anomaly_type)
     if seedream_mode == "boxed_single_edit":
-        return (
-            "在如图设备间的红框区域内合成设备漏水的水渍，需要至少 200*200px。\n"
-            "基于输入的设备间监控原图进行图生图局部编辑，不要重新生成新场景。\n"
-            f"请只在红框区域/像素区域 [x1={x1}, y1={y1}, x2={x2}, y2={y2}] 合成设备漏水的水渍，"
-            "红框只是位置提示，最终图片必须去掉红框。\n"
-            "水渍应像设备漏水自然形成：透明清水、湿润反光、不规则边缘，可有少量水滴或细流，并贴合原图中的设备、管线或地面结构。\n"
-            "必须保持原图的设备、墙面、地面、管线、时间戳、视角、构图、清晰度和监控画面风格不变；不要改变机房布局，"
-            "不要替换设备，不要生成新的房间，不要裁剪、缩放或加小窗。\n"
-            "输出完整原图尺寸的图片，除了红框内漏水水渍外，其余区域应尽量与输入图一致。\n\n"
-            f"{anomaly_detail}"
-        )
+        return f"在图{x1} {y1} {x2} {y2}区域的地面上合成真实的设备漏水水渍，水渍面积至少200x200像素，水渍自然流淌，与地面光影融合，保持其余场景不变，去除红框"
     if seedream_mode == "single_image_edit":
-        return (
-            "在如图设备间合成设备漏水的水渍，需要至少 200*200px。\n"
-            "基于输入的设备间监控原图进行图生图局部编辑，不要重新生成新场景。\n"
-            f"请只在像素区域 [x1={x1}, y1={y1}, x2={x2}, y2={y2}] 附近合成设备漏水的水渍，"
-            "表现为清水漏水形成的透明湿痕、水滴、细流和地面反光水迹。\n"
-            "必须保持原图的设备、墙面、地面、管线、时间戳、视角、构图、清晰度和监控画面风格不变；不要改变机房布局，"
-            "不要替换设备，不要生成新的房间，不要裁剪、缩放或加小窗。\n"
-            "输出完整原图尺寸的图片，除了局部漏水水渍外，其余区域应尽量与输入图一致。\n\n"
-            f"{anomaly_detail}"
-        )
+        return f"在图{x1} {y1} {x2} {y2}区域的地面上合成真实的设备漏水水渍，水渍面积至少200x200像素，水渍自然流淌，与地面光影融合，保持其余场景不变"
     if seedream_mode == "boxed_fusion":
-        return (
-            "在第一张如图设备间的红框区域内合成设备漏水的水渍，需要至少 200*200px。\n"
-            "基于第一张设备间监控原图和第二张水渍参考图进行图生图局部融合，不要重新生成新场景。\n"
-            "第一张图是唯一底图，第二张图只作为水渍形态、透明湿痕、边缘和反光质感参考，不要复制第二张图的背景或场景。\n"
-            f"请在第一张图红框区域/像素区域 [x1={x1}, y1={y1}, x2={x2}, y2={y2}] 合成设备漏水的水渍，"
-            "红框只是位置提示，最终图片必须去掉红框。\n"
-            "水渍应像设备漏水自然形成：透明清水、湿润反光、不规则边缘，可有少量水滴或细流，并贴合原图中的设备、管线或地面结构。\n"
-            "必须保持第一张图的设备、墙面、地面、管线、时间戳、视角、构图、清晰度和监控画面风格不变；不要改变机房布局，"
-            "不要替换设备，不要生成新的房间，不要裁剪、缩放或加小窗。\n"
-            "输出完整原图尺寸的图片，除了红框内漏水水渍外，其余区域应尽量与第一张图一致。\n\n"
-            f"{anomaly_detail}"
-        )
+        return "将这两张图融合，在设备间地面上生成自然的漏水水渍效果，水渍面积至少200x200px，保持场景真实自然"
     return (
         f"{prompt}\n\n"
         "Edit region constraint: use the clean input image as the source image and edit only inside "
@@ -286,24 +256,46 @@ def _seedream_anomaly_detail(anomaly_type: str | None) -> str:
     )
 
 
-def _with_seedream_image_input(payload: dict[str, Any], image_data_urls: list[str]) -> dict[str, Any]:
-    field = os.getenv("SEEDREAM_IMAGE_FIELD", "image_urls").strip() or "image_urls"
-    if field == "image":
-        payload["image"] = image_data_urls[0]
-    elif field == "image_url":
-        payload["image_url"] = image_data_urls[0]
+def _seedream_image_field(seedream_mode: str | None, image_count: int) -> str:
+    override = os.getenv("SEEDREAM_IMAGE_FIELD", "").strip()
+    if override:
+        return override
+    if seedream_mode == "boxed_fusion" or image_count > 1:
+        return "images"
+    return "image"
+
+
+def _with_seedream_image_input(
+    payload: dict[str, Any],
+    image_data_urls: list[str],
+    *,
+    seedream_mode: str | None = None,
+) -> dict[str, Any]:
+    field = _seedream_image_field(seedream_mode, len(image_data_urls))
+    if field in {"image", "image_url"}:
+        payload[field] = image_data_urls[0]
+    elif field in {"images", "image_urls"}:
+        payload[field] = image_data_urls
     else:
-        payload["image_urls"] = image_data_urls
+        payload[field] = image_data_urls if len(image_data_urls) > 1 else image_data_urls[0]
     return payload
+
+
+def _seedream_payload_model(model: str, seedream_mode: str | None) -> str:
+    if seedream_mode in {"single_image_edit", "boxed_single_edit"}:
+        return os.getenv("SEEDREAM_SINGLE_IMAGE_MODEL", "doubao-seedream-5-0-pro-260628").strip() or model
+    return model
 
 
 def _seedream_size_from_env() -> str | None:
     size = os.getenv("SEEDREAM_SIZE", "").strip()
-    if not size or size.lower() == "auto":
+    if not size:
         return None
+    if size.lower() == "auto":
+        return "auto"
     normalized = size.lower()
     if normalized in {"2k", "3k", "4k"}:
-        return normalized
+        return size
     parts = normalized.split("x", 1)
     if len(parts) == 2 and all(part.isdigit() and int(part) > 0 for part in parts):
         return normalized
@@ -342,8 +334,11 @@ def _scale_size_to_min_pixels(width: int, height: int, min_pixels: int) -> tuple
 
 def _seedream_size_for_image(image_path: str | Path) -> str:
     override = _seedream_size_from_env()
-    if override:
+    if override and override != "auto":
         return override
+    default_size = os.getenv("SEEDREAM_DEFAULT_SIZE", DEFAULT_SEEDREAM_SIZE).strip()
+    if not override and default_size:
+        return default_size
     with Image.open(image_path) as image:
         width, height = image.size
     width, height = _scale_size_to_min_pixels(width, height, _seedream_min_pixels())
@@ -384,9 +379,10 @@ class WanImageClient:
                 anomaly_type=anomaly_type,
             )
             request_payload: dict[str, Any] = {
-                "model": self.model,
+                "model": _seedream_payload_model(self.model, seedream_mode),
                 "prompt": seedream_prompt,
                 "n": 1,
+                "output_format": os.getenv("SEEDREAM_OUTPUT_FORMAT", "png"),
                 "watermark": False,
             }
             response_format = os.getenv("SEEDREAM_RESPONSE_FORMAT")
@@ -396,14 +392,16 @@ class WanImageClient:
             request_payload = _with_seedream_image_input(
                 request_payload,
                 [image_to_data_url(path) for path in request_image_paths],
+                seedream_mode=seedream_mode,
             )
 
             request_log_payload = dict(request_payload)
             for image_key in ("image", "image_url"):
                 if image_key in request_log_payload:
                     request_log_payload[image_key] = image_path
-            if "image_urls" in request_log_payload:
-                request_log_payload["image_urls"] = request_image_paths
+            for image_key in ("images", "image_urls"):
+                if image_key in request_log_payload:
+                    request_log_payload[image_key] = request_image_paths
             request_log_payload["edit_bbox"] = list(bbox)
             if seedream_mode:
                 request_log_payload["seedream_mode"] = seedream_mode
