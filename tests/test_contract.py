@@ -706,6 +706,47 @@ class ContractTests(unittest.TestCase):
             self.assertTrue(seedream_payloads[0]["image"][1].startswith("data:image/png;base64,"))
             self.assertNotIn("images", seedream_payloads[0])
 
+    def test_seedream_source_preserving_composition_keeps_outside_bbox_unchanged(self) -> None:
+        import numpy as np
+        from PIL import Image, ImageDraw
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from main import _compose_seedream_source_preserving_output
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original_path = root / "original.jpg"
+            raw_path = root / "raw.png"
+            output_path = root / "generated.png"
+            original = Image.new("RGB", (120, 90), (80, 90, 100))
+            ImageDraw.Draw(original).rectangle((0, 0, 119, 20), fill=(20, 30, 40))
+            original.save(original_path)
+            raw = Image.new("RGB", (240, 180), (160, 170, 180))
+            draw = ImageDraw.Draw(raw)
+            draw.rectangle((80, 80, 150, 135), fill=(210, 230, 240))
+            raw.save(raw_path)
+
+            metadata = _compose_seedream_source_preserving_output(
+                original_path,
+                raw_path,
+                output_path,
+                (40, 40, 75, 68),
+            )
+
+            original_out = Image.open(original_path).convert("RGB")
+            composed = Image.open(output_path).convert("RGB")
+            original_array = np.asarray(original_out)
+            composed_array = np.asarray(composed)
+            outside_mask = np.ones(original_array.shape[:2], dtype=bool)
+            outside_mask[40:68, 40:75] = False
+            self.assertTrue(np.array_equal(original_array[outside_mask], composed_array[outside_mask]))
+            self.assertEqual(metadata["seedream_composition_mode"], "source_preserving_bbox_diff_blend")
+            self.assertEqual(metadata["seedream_composition_bbox"], [40, 40, 75, 68])
+
     def test_seedream_boxed_single_edit_uses_only_guide_input(self) -> None:
         from PIL import Image
 

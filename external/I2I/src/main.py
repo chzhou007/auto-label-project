@@ -10,7 +10,7 @@ import random
 import time
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 from config import I2IServiceConfig, PipelineConfig
 from cropper import crop_anomaly
@@ -133,6 +133,49 @@ def _normalize_generated_size(image_path: Path, target_size: tuple[int, int]) ->
             return
         resized = image.convert("RGB").resize(target_size, Image.Resampling.LANCZOS)
         resized.save(image_path)
+
+
+def _compose_seedream_source_preserving_output(
+    original_path: Path,
+    raw_generated_path: Path,
+    output_path: Path,
+    edit_bbox: tuple[int, int, int, int],
+) -> dict:
+    with Image.open(original_path) as original_image, Image.open(raw_generated_path) as generated_image:
+        original = original_image.convert("RGB")
+        generated = generated_image.convert("RGB")
+        if generated.size != original.size:
+            generated = generated.resize(original.size, Image.Resampling.LANCZOS)
+
+    width, height = original.size
+    x1, y1, x2, y2 = edit_bbox
+    x1 = max(0, min(width, int(x1)))
+    x2 = max(0, min(width, int(x2)))
+    y1 = max(0, min(height, int(y1)))
+    y2 = max(0, min(height, int(y2)))
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError("empty Seedream composition bbox")
+
+    original_array = np.asarray(original, dtype=np.int16)
+    generated_array = np.asarray(generated, dtype=np.int16)
+    roi_diff = np.max(np.abs(generated_array[y1:y2, x1:x2] - original_array[y1:y2, x1:x2]), axis=2)
+    threshold = int(os.getenv("SEEDREAM_COMPOSE_DIFF_THRESHOLD", "8"))
+    local_mask = np.where(roi_diff > threshold, 255, 0).astype(np.uint8)
+    changed_ratio = float((local_mask > 0).mean()) if local_mask.size else 0.0
+
+    mask = Image.new("L", original.size, 0)
+    local_mask_image = Image.fromarray(local_mask, mode="L")
+    local_mask_image = local_mask_image.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(radius=5))
+    mask.paste(local_mask_image, (x1, y1))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.composite(generated, original, mask).save(output_path)
+    return {
+        "seedream_composition_mode": "source_preserving_bbox_diff_blend",
+        "seedream_raw_output_uri": relative_uri(raw_generated_path),
+        "seedream_composition_bbox": [x1, y1, x2, y2],
+        "seedream_composition_changed_ratio": changed_ratio,
+    }
 
 
 def _bbox_iou(a: dict, b: tuple[int, int, int, int]) -> float:
@@ -446,6 +489,7 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
 
     prompt = build_wan_prompt(task["anomaly_type"])
     generated_path = dirs["generated_images"] / f"{sample_id}.png"
+    seedream_raw_path = dirs["seedream_raw_outputs"] / f"{sample_id}_seedream_raw.png"
     mask_path = dirs["masks"] / f"{sample_id}_obj_000001_mask.png"
     crop_path = dirs["crops"] / f"{sample_id}_obj_000001_crop.jpg"
     request_log_path = dirs["requests"] / f"{sample_id}_wan_request.json"
@@ -499,18 +543,28 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
                 "experimental_seedream": True,
                 "seedream_mode": cfg.seedream_mode,
             }
+        request_output_path = seedream_raw_path if cfg.seedream_mode else generated_path
         wan.edit_image_with_wan(
             image_path=str(request_image_path),
             prompt=prompt,
             negative_prompt=NEGATIVE_PROMPT,
             bbox=request_bbox,
-            output_path=str(generated_path),
+            output_path=str(request_output_path),
             anomaly_type=task["anomaly_type"],
             request_log_path=str(request_log_path),
             response_log_path=str(response_log_path),
             seedream_mode=cfg.seedream_mode,
             seedream_reference_paths=seedream_reference_paths,
         )
+        if cfg.seedream_mode:
+            seedream_metadata.update(
+                _compose_seedream_source_preserving_output(
+                    original_path,
+                    seedream_raw_path,
+                    generated_path,
+                    request_bbox,
+                )
+            )
         gen_width, gen_height = image_size(generated_path)
         if (gen_width, gen_height) != (width, height):
             logger.info("%s generated image size differs; resizing generated image to original dimensions", sample_id)

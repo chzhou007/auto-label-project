@@ -248,7 +248,11 @@ def _seedream_prompt(
     if seedream_mode == "single_image_edit":
         return f"在图{x1} {y1} {x2} {y2}区域的地面上合成真实的设备漏水水渍，水渍面积至少200x200像素，水渍自然流淌，与地面光影融合，保持其余场景不变"
     if seedream_mode == "boxed_fusion":
-        return "将这两张图融合，在设备间地面上生成自然的漏水水渍效果，水渍面积至少200x200px，保持场景真实自然"
+        return (
+            "以图1作为唯一源图，参考图2的水渍质感，只在图1红框区域内的设备间地面上生成自然漏水水渍，"
+            "水渍面积至少200x200px。必须保持图1原始构图、相机视角、时间戳、设备位置和背景不变；"
+            "不要生成第二张图、画中画、贴片、窗口、边框、图层或场景副本。最终图中去除红框，只保留自然水渍。"
+        )
     return (
         f"{prompt}\n\n"
         "Edit region constraint: use the clean input image as the source image and edit only inside "
