@@ -27,7 +27,7 @@ class I2IGenerator:
         image_model: str = "doubao-seedream-5.0-lite",
         grid_layout: str = "4x4",
         edit_bbox_expand_ratio: float = 0.20,
-        crop_expand_ratio: float = 0.10,
+        crop_expand_ratio: float = 0.03,
         workers: int = 1,
         dry_run: bool = False,
         skip_existing: bool = False,

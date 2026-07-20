@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 import re
 from typing import Any
 
@@ -112,6 +113,19 @@ def _use_response_format() -> bool:
     return os.getenv("QWEN397B_USE_RESPONSE_FORMAT", "1").lower() not in {"0", "false", "no"}
 
 
+def _vlm_image_max_bytes() -> int:
+    raw = os.getenv("QWEN397B_IMAGE_MAX_BYTES", "6000000").strip()
+    if not raw:
+        return 6_000_000
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("QWEN397B_IMAGE_MAX_BYTES must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError("QWEN397B_IMAGE_MAX_BYTES must be a positive integer")
+    return value
+
+
 def validate_vlm_selection(payload: dict[str, Any]) -> dict[str, Any]:
     selected = normalize_grid_id(str(payload.get("selected_grid", "")))
     candidates = payload.get("top_candidates") or []
@@ -157,6 +171,15 @@ class QwenVLMClient:
 
     def _build_request_payloads(self, grid_image_path: str, prompt: str) -> tuple[list[str], dict[str, Any], dict[str, Any]]:
         endpoint = _service_endpoint(self.config)
+        image_bytes = Path(grid_image_path).stat().st_size
+        max_image_bytes = _vlm_image_max_bytes()
+        if image_bytes > max_image_bytes:
+            raise RuntimeError(
+                "Qwen request image too large after grid preview compression: "
+                f"{image_bytes} bytes > {max_image_bytes} bytes; lower QWEN_GRID_PREVIEW_MAX_SIDE "
+                "or QWEN_GRID_PREVIEW_JPEG_QUALITY"
+            )
+        image_data_url = image_to_data_url(grid_image_path)
         if _is_openai_compatible(self.config, endpoint):
             request_endpoints = _candidate_request_endpoints(endpoint)
             body: dict[str, Any] = {
@@ -166,7 +189,7 @@ class QwenVLMClient:
                         "role": "user",
                         "content": [
                             {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": image_to_data_url(grid_image_path)}},
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
                         ],
                     }
                 ],
@@ -177,6 +200,8 @@ class QwenVLMClient:
                 body["response_format"] = {"type": "json_object"}
             log_body = {
                 **body,
+                "image_bytes": image_bytes,
+                "image_max_bytes": max_image_bytes,
                 "messages": [
                     {
                         "role": "user",
@@ -196,7 +221,7 @@ class QwenVLMClient:
                     {
                         "role": "user",
                         "content": [
-                            {"image": image_to_data_url(grid_image_path)},
+                            {"image": image_data_url},
                             {"text": prompt},
                         ],
                     }
@@ -206,6 +231,8 @@ class QwenVLMClient:
         }
         log_body = {
             "model": self.model,
+            "image_bytes": image_bytes,
+            "image_max_bytes": max_image_bytes,
             "input": {
                 "messages": [
                     {

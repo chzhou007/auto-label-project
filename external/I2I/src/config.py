@@ -23,7 +23,7 @@ class PipelineConfig:
     image_model: str = "doubao-seedream-5-0-pro-260628"
     grid_layout: str = "4x4"
     edit_bbox_expand_ratio: float = 0.20
-    crop_expand_ratio: float = 0.10
+    crop_expand_ratio: float = 0.03
     vlm_min_confidence: float = 0.45
     max_retries: int = 2
     dry_run: bool = False

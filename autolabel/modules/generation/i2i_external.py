@@ -154,7 +154,7 @@ class ExternalI2IGenerationModule:
                 image_model=runtime["image_model_name"],
                 grid_layout=generation_cfg.get("grid_layout", "4x4"),
                 edit_bbox_expand_ratio=float(generation_cfg.get("edit_bbox_expand_ratio", 0.20)),
-                crop_expand_ratio=float(generation_cfg.get("crop_expand_ratio", 0.10)),
+                crop_expand_ratio=float(generation_cfg.get("crop_expand_ratio", 0.03)),
                 workers=int(generation_cfg.get("workers", 1)),
                 dry_run=dry_run or bool(generation_cfg.get("dry_run", False)),
                 skip_existing=skip_existing or bool(generation_cfg.get("skip_existing", False)),

@@ -244,14 +244,32 @@ def _seedream_prompt(
 ) -> str:
     x1, y1, x2, y2 = bbox
     if seedream_mode == "boxed_single_edit":
-        return f"在图{x1} {y1} {x2} {y2}区域的地面上合成真实的设备漏水水渍，水渍面积至少200x200像素，水渍自然流淌，与地面光影融合，保持其余场景不变，去除红框"
+        return (
+            f"Use the input image as the only source scene. The red rectangle marks the allowed edit region "
+            f"[{x1}, {y1}, {x2}, {y2}]. Add one subtle natural clear-water leak stain inside that region, "
+            "roughly 80-160 px across. Do not fill the whole rectangle. Feather the edges into the floor or "
+            "nearby equipment surface. Remove the red rectangle in the final image. Preserve the camera, "
+            "timestamp, equipment, background, lighting, and all pixels outside the rectangle as much as possible. "
+            "No inset image, no pasted panel, no border, no duplicated scene."
+        )
     if seedream_mode == "single_image_edit":
-        return f"在图{x1} {y1} {x2} {y2}区域的地面上合成真实的设备漏水水渍，水渍面积至少200x200像素，水渍自然流淌，与地面光影融合，保持其余场景不变"
+        return (
+            f"Use the input image as the only source scene. Add one subtle natural clear-water leak stain near "
+            f"pixel region [{x1}, {y1}, {x2}, {y2}], roughly 80-160 px across. Preserve the original camera, "
+            "timestamp, equipment positions, background, lighting, and scene layout. Do not redraw the room, "
+            "do not change viewpoint, and do not create a pasted patch or duplicated scene."
+        )
     if seedream_mode == "boxed_fusion":
         return (
-            "以图1作为唯一源图，参考图2的水渍质感，只在图1红框区域内的设备间地面上生成自然漏水水渍，"
-            "水渍面积至少200x200px。必须保持图1原始构图、相机视角、时间戳、设备位置和背景不变；"
-            "不要生成第二张图、画中画、贴片、窗口、边框、图层或场景副本。最终图中去除红框，只保留自然水渍。"
+            f"Use image 1 as the only source scene. Use image 2 only as a water-stain texture reference. "
+            f"The red rectangle in image 1 is a placement guide for region [{x1}, {y1}, {x2}, {y2}]. "
+            "Create one realistic clear-water leak stain inside the red rectangle, roughly 80-160 px across. "
+            "Do not cover or repaint the whole rectangle. The stain should be transparent, low contrast, "
+            "irregular, with wet reflections and feathered edges that blend into the original floor or nearby "
+            "equipment surface. Remove the red rectangle completely in the final image. Preserve image 1's "
+            "camera view, timestamp, equipment positions, background, lighting, and scene layout. Return one "
+            "full-size edited source-scene image. No second image, no inset, no pasted panel, no border, no "
+            "visible layer, no duplicated room, no new scene."
         )
     return (
         f"{prompt}\n\n"

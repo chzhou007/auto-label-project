@@ -488,7 +488,7 @@ def apply_localizer_postprocess(
     crop_dir = ensure_dir(Path(processed_root) / "crops")
     debug_root = ensure_dir(Path(processed_root) / "metadata" / "debug" / processed["sample_id"])
     generation_cfg = pipeline_config.get("generation", {})
-    crop_expand_ratio = float(generation_cfg.get("crop_expand_ratio", 0.10))
+    crop_expand_ratio = float(generation_cfg.get("crop_expand_ratio", 0.03))
     any_box_updated = False
 
     for obj in processed.get("objects", []):

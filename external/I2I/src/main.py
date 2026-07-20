@@ -9,6 +9,7 @@ from pathlib import Path
 import random
 import time
 
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -45,7 +46,7 @@ def parse_args() -> PipelineConfig:
     parser.add_argument("--image-model", default="doubao-seedream-5-0-pro-260628")
     parser.add_argument("--grid-layout", default="4x4", choices=["4x4"])
     parser.add_argument("--edit-bbox-expand-ratio", type=float, default=0.20)
-    parser.add_argument("--crop-expand-ratio", type=float, default=0.10)
+    parser.add_argument("--crop-expand-ratio", type=float, default=0.03)
     parser.add_argument("--vlm-min-confidence", type=float, default=0.45)
     parser.add_argument("--max-retries", type=int, default=2)
     parser.add_argument("--dry-run", action="store_true", help="Run without external model APIs using deterministic local stubs.")
@@ -89,6 +90,7 @@ def _failure_artifact_context(
     response_log_path: Path,
     mask_path: Path,
     crop_path: Path,
+    extra_artifact_paths: dict[str, Path] | None = None,
 ) -> dict:
     artifacts: dict[str, str] = {}
     if generated_path.exists():
@@ -104,6 +106,9 @@ def _failure_artifact_context(
         artifacts["mask_uri"] = relative_uri(mask_path)
     if crop_path.exists():
         artifacts["crop_uri"] = relative_uri(crop_path)
+    for key, path in (extra_artifact_paths or {}).items():
+        if path.exists():
+            artifacts[key] = relative_uri(path)
     return {"failure_artifacts": artifacts} if artifacts else {}
 
 
@@ -140,6 +145,9 @@ def _compose_seedream_source_preserving_output(
     raw_generated_path: Path,
     output_path: Path,
     edit_bbox: tuple[int, int, int, int],
+    water_mask_output_path: Path | None = None,
+    composition_mask_output_path: Path | None = None,
+    anomaly_type: str | None = None,
 ) -> dict:
     with Image.open(original_path) as original_image, Image.open(raw_generated_path) as generated_image:
         original = original_image.convert("RGB")
@@ -158,24 +166,67 @@ def _compose_seedream_source_preserving_output(
 
     original_array = np.asarray(original, dtype=np.int16)
     generated_array = np.asarray(generated, dtype=np.int16)
+    original_roi = original_array[y1:y2, x1:x2].astype(np.uint8)
+    generated_roi = generated_array[y1:y2, x1:x2].astype(np.uint8)
+    water = _extract_seedream_water_mask(original_roi, generated_roi, anomaly_type)
+    local_water_mask = water["mask"]
+    wx1, wy1, wx2, wy2 = water["local_bbox"]
+
     roi_diff = np.max(np.abs(generated_array[y1:y2, x1:x2] - original_array[y1:y2, x1:x2]), axis=2)
     threshold = int(os.getenv("SEEDREAM_COMPOSE_DIFF_THRESHOLD", "8"))
-    local_mask = np.where(roi_diff > threshold, 255, 0).astype(np.uint8)
-    changed_ratio = float((local_mask > 0).mean()) if local_mask.size else 0.0
+    raw_diff_mask = np.where(roi_diff > threshold, 255, 0).astype(np.uint8)
+    raw_changed_ratio = float((raw_diff_mask > 0).mean()) if raw_diff_mask.size else 0.0
+    water_mask_area = int((local_water_mask > 0).sum())
+    red_box_area = max(1, (x2 - x1) * (y2 - y1))
+    water_mask_coverage_ratio = float(water_mask_area / red_box_area)
+    water_bbox = (x1 + wx1, y1 + wy1, x1 + wx2, y1 + wy2)
+    bbox_red_box_iou = _bbox_tuple_iou(water_bbox, (x1, y1, x2, y2))
+    patch_like_score = max(water_mask_coverage_ratio, bbox_red_box_iou)
 
     mask = Image.new("L", original.size, 0)
-    local_mask_image = Image.fromarray(local_mask, mode="L")
-    local_mask_image = local_mask_image.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(radius=5))
-    mask.paste(local_mask_image, (x1, y1))
+    water_mask_image = Image.fromarray(local_water_mask, mode="L")
+    mask.paste(water_mask_image, (x1, y1))
+    composition_mask = Image.new("L", original.size, 0)
+    composition_local_mask = water_mask_image.filter(ImageFilter.MaxFilter(5)).filter(ImageFilter.GaussianBlur(radius=2))
+    composition_mask.paste(composition_local_mask, (x1, y1))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.composite(generated, original, mask).save(output_path)
+    Image.composite(generated, original, composition_mask).save(output_path)
+    if water_mask_output_path is not None:
+        water_mask_output_path.parent.mkdir(parents=True, exist_ok=True)
+        mask.save(water_mask_output_path)
+    if composition_mask_output_path is not None:
+        composition_mask_output_path.parent.mkdir(parents=True, exist_ok=True)
+        composition_mask.save(composition_mask_output_path)
     return {
-        "seedream_composition_mode": "source_preserving_bbox_diff_blend",
+        "seedream_composition_mode": "source_preserving_water_mask_blend",
         "seedream_raw_output_uri": relative_uri(raw_generated_path),
         "seedream_composition_bbox": [x1, y1, x2, y2],
-        "seedream_composition_changed_ratio": changed_ratio,
+        "seedream_composition_mask_bbox": list(water_bbox),
+        "seedream_water_mask_bbox": list(water_bbox),
+        "seedream_water_mask_area": water_mask_area,
+        "seedream_mask_coverage_ratio": water_mask_coverage_ratio,
+        "seedream_bbox_red_box_iou": bbox_red_box_iou,
+        "seedream_patch_like_score": patch_like_score,
+        "seedream_raw_changed_ratio": raw_changed_ratio,
+        "seedream_composition_changed_ratio": raw_changed_ratio,
+        "seedream_water_mask_uri": relative_uri(water_mask_output_path) if water_mask_output_path is not None else None,
+        "seedream_composition_mask_uri": (
+            relative_uri(composition_mask_output_path) if composition_mask_output_path is not None else None
+        ),
     }
+
+
+def _bbox_tuple_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union else 0.0
 
 
 def _bbox_iou(a: dict, b: tuple[int, int, int, int]) -> float:
@@ -188,6 +239,133 @@ def _bbox_iou(a: dict, b: tuple[int, int, int, int]) -> float:
     area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
     union = area_a + area_b - inter
     return inter / union if union else 0.0
+
+
+def _extract_seedream_water_mask(original_roi: np.ndarray, generated_roi: np.ndarray, anomaly_type: str | None) -> dict:
+    if original_roi.shape != generated_roi.shape or original_roi.size == 0:
+        raise ValueError("empty Seedream water mask roi")
+
+    diff = np.abs(generated_roi.astype(np.int16) - original_roi.astype(np.int16))
+    max_diff = diff.max(axis=2)
+    mean_diff = diff.mean(axis=2)
+    threshold = int(os.getenv("SEEDREAM_COMPOSE_DIFF_THRESHOLD", "8"))
+    changed = (max_diff > threshold) | (mean_diff > max(4.0, threshold * 0.6))
+
+    if anomaly_type != "water_leak":
+        mask = np.where(changed, 255, 0).astype(np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        ys, xs = np.where(mask > 0)
+        if xs.size == 0 or ys.size == 0:
+            raise ValueError("Seedream mask extraction failed: no changed pixels")
+        return {
+            "mask": mask,
+            "local_bbox": (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1),
+            "area": int((mask > 0).sum()),
+            "coverage_ratio": float((mask > 0).mean()),
+            "bbox_area_ratio": float(((xs.max() - xs.min() + 1) * (ys.max() - ys.min() + 1)) / mask.size),
+        }
+
+    hsv = cv2.cvtColor(generated_roi, cv2.COLOR_RGB2HSV)
+    saturation = hsv[:, :, 1]
+    value = hsv[:, :, 2]
+    original_gray = cv2.cvtColor(original_roi, cv2.COLOR_RGB2GRAY).astype(np.int16)
+    generated_gray = cv2.cvtColor(generated_roi, cv2.COLOR_RGB2GRAY).astype(np.int16)
+    gray_delta = generated_gray - original_gray
+
+    max_saturation = int(os.getenv("SEEDREAM_WATER_MAX_SATURATION", "110"))
+    dark_delta = int(os.getenv("SEEDREAM_WATER_DARK_DELTA", "5"))
+    bright_delta = int(os.getenv("SEEDREAM_WATER_BRIGHT_DELTA", "14"))
+    low_saturation = saturation <= max_saturation
+    wet_dark = gray_delta <= -dark_delta
+    subtle_reflection = (gray_delta >= bright_delta) & (saturation <= max_saturation - 20) & (value < 245)
+    water_like = changed & low_saturation & (wet_dark | subtle_reflection | (np.abs(gray_delta) >= bright_delta))
+
+    if float(water_like.mean()) < 0.001:
+        water_like = changed & low_saturation & (np.abs(gray_delta) >= max(8, bright_delta // 2))
+
+    red_residual = (generated_roi[:, :, 0] > 160) & (generated_roi[:, :, 1] < 100) & (generated_roi[:, :, 2] < 100)
+    mask = np.where(water_like & ~red_residual, 255, 0).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    roi_h, roi_w = mask.shape[:2]
+    roi_area = max(1, roi_w * roi_h)
+    min_area = max(24, int(roi_area * float(os.getenv("SEEDREAM_WATER_MIN_AREA_RATIO", "0.0015"))))
+    max_area = int(roi_area * float(os.getenv("SEEDREAM_WATER_MAX_AREA_RATIO", "0.45")))
+    max_bbox_area = roi_area * float(os.getenv("SEEDREAM_WATER_MAX_BBOX_AREA_RATIO", "0.70"))
+
+    candidates: list[tuple[float, int, tuple[int, int, int, int]]] = []
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area or area > max_area:
+            continue
+        lx = int(stats[label, cv2.CC_STAT_LEFT])
+        ly = int(stats[label, cv2.CC_STAT_TOP])
+        lw = int(stats[label, cv2.CC_STAT_WIDTH])
+        lh = int(stats[label, cv2.CC_STAT_HEIGHT])
+        bbox_area = max(1, lw * lh)
+        if bbox_area > max_bbox_area:
+            continue
+        extent = area / float(bbox_area)
+        aspect = max(lw / max(1, lh), lh / max(1, lw))
+        touches_border = lx <= 1 or ly <= 1 or lx + lw >= roi_w - 1 or ly + lh >= roi_h - 1
+        component = labels == label
+        dark_fraction = float((wet_dark & component).sum() / max(1, area))
+        low_sat_fraction = float((low_saturation & component).sum() / max(1, area))
+        lower_bias = (ly + lh / 2.0) / max(1.0, roi_h)
+        area_score = min(1.0, area / max(1.0, roi_area * 0.08))
+        score = 1.0 * area_score + 0.9 * dark_fraction + 0.5 * low_sat_fraction + 0.25 * lower_bias
+        score -= 0.8 * max(0.0, extent - 0.72)
+        score -= 0.25 * max(0.0, aspect - 5.0)
+        if touches_border:
+            score -= 0.35
+        candidates.append((score, label, (lx, ly, lx + lw, ly + lh)))
+
+    if not candidates:
+        raise ValueError("Seedream water mask extraction failed: no compact water-like components")
+
+    candidates.sort(reverse=True, key=lambda item: item[0])
+    best_score = candidates[0][0]
+    keep = np.zeros(mask.shape, dtype=np.uint8)
+    kept_boxes: list[tuple[int, int, int, int]] = []
+    kept_area = 0
+    for score, label, box in candidates[:4]:
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if score < best_score - 0.65 and kept_boxes:
+            continue
+        if (kept_area + area) > max_area:
+            continue
+        keep[labels == label] = 255
+        kept_boxes.append(box)
+        kept_area += area
+
+    if not kept_boxes:
+        raise ValueError("Seedream water mask extraction failed: all water-like components rejected")
+    bx1 = min(box[0] for box in kept_boxes)
+    by1 = min(box[1] for box in kept_boxes)
+    bx2 = max(box[2] for box in kept_boxes)
+    by2 = max(box[3] for box in kept_boxes)
+    if bx2 - bx1 < 8 or by2 - by1 < 8:
+        raise ValueError(f"Seedream water mask extraction failed: bbox too small {(bx1, by1, bx2, by2)}")
+
+    coverage_ratio = kept_area / float(roi_area)
+    bbox_area_ratio = ((bx2 - bx1) * (by2 - by1)) / float(roi_area)
+    if coverage_ratio > float(os.getenv("SEEDREAM_WATER_MAX_AREA_RATIO", "0.45")):
+        raise ValueError(f"Seedream water mask extraction failed: mask too large ({coverage_ratio:.3f})")
+    if bbox_area_ratio > float(os.getenv("SEEDREAM_WATER_MAX_BBOX_AREA_RATIO", "0.70")):
+        raise ValueError(f"Seedream water mask extraction failed: bbox too large ({bbox_area_ratio:.3f})")
+
+    return {
+        "mask": keep,
+        "local_bbox": (bx1, by1, bx2, by2),
+        "area": kept_area,
+        "coverage_ratio": coverage_ratio,
+        "bbox_area_ratio": bbox_area_ratio,
+    }
 
 
 def _is_refined_final_bbox(final_box: dict, expanded_bbox: tuple[int, int, int, int]) -> bool:
@@ -423,6 +601,7 @@ def _validate_seedream_experiment_output(
     generated_path: str | Path,
     allowed_bbox: tuple[int, int, int, int],
     seedream_mode: str | None,
+    composition_metadata: dict | None = None,
 ) -> dict:
     result = {
         "passes_quality": True,
@@ -430,7 +609,16 @@ def _validate_seedream_experiment_output(
         "outside_change_ratio": _outside_change_ratio(original_path, generated_path, allowed_bbox),
         "outside_structure_change_ratio": _outside_structure_change_ratio(original_path, generated_path, allowed_bbox),
         "red_box_residual_ratio": 0.0,
+        "seedream_mask_coverage_ratio": None,
+        "seedream_bbox_red_box_iou": None,
+        "seedream_patch_like_score": None,
+        "seedream_raw_changed_ratio": None,
     }
+    if composition_metadata:
+        result["seedream_mask_coverage_ratio"] = composition_metadata.get("seedream_mask_coverage_ratio")
+        result["seedream_bbox_red_box_iou"] = composition_metadata.get("seedream_bbox_red_box_iou")
+        result["seedream_patch_like_score"] = composition_metadata.get("seedream_patch_like_score")
+        result["seedream_raw_changed_ratio"] = composition_metadata.get("seedream_raw_changed_ratio")
     max_outside_change = float(str(os.getenv("SEEDREAM_MAX_OUTSIDE_CHANGE_RATIO", "0.20")).strip())
     max_structure_change = float(str(os.getenv("SEEDREAM_MAX_OUTSIDE_STRUCTURE_CHANGE_RATIO", "0.05")).strip())
     reasons = []
@@ -444,6 +632,13 @@ def _validate_seedream_experiment_output(
         max_red_ratio = float(str(os.getenv("SEEDREAM_MAX_RED_RESIDUAL_RATIO", "0.02")).strip())
         if result["red_box_residual_ratio"] > max_red_ratio:
             reasons.append("seedream_red_box_residual")
+    if composition_metadata:
+        max_mask_coverage = float(str(os.getenv("SEEDREAM_MAX_WATER_MASK_COVERAGE_RATIO", "0.45")).strip())
+        max_bbox_iou = float(str(os.getenv("SEEDREAM_MAX_WATER_BBOX_RED_BOX_IOU", "0.75")).strip())
+        mask_coverage = float(composition_metadata.get("seedream_mask_coverage_ratio") or 0.0)
+        bbox_iou = float(composition_metadata.get("seedream_bbox_red_box_iou") or 0.0)
+        if mask_coverage > max_mask_coverage or bbox_iou > max_bbox_iou:
+            reasons.append("seedream_patch_like_region")
     if reasons:
         result["passes_quality"] = False
         result["quality_reason"] = ",".join(reasons)
@@ -492,6 +687,7 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
     seedream_raw_path = dirs["seedream_raw_outputs"] / f"{sample_id}_seedream_raw.png"
     mask_path = dirs["masks"] / f"{sample_id}_obj_000001_mask.png"
     crop_path = dirs["crops"] / f"{sample_id}_obj_000001_crop.jpg"
+    composition_mask_path = dirs["seedream_composition_masks"] / f"{sample_id}_composition_mask.png"
     request_log_path = dirs["requests"] / f"{sample_id}_wan_request.json"
     response_log_path = dirs["responses"] / f"{sample_id}_wan_response.json"
     seedream_quality = None
@@ -563,6 +759,9 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
                     seedream_raw_path,
                     generated_path,
                     request_bbox,
+                    water_mask_output_path=mask_path,
+                    composition_mask_output_path=composition_mask_path,
+                    anomaly_type=task["anomaly_type"],
                 )
             )
         gen_width, gen_height = image_size(generated_path)
@@ -577,6 +776,7 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
                 generated_path,
                 request_bbox,
                 cfg.seedream_mode,
+                seedream_metadata,
             )
             if not seedream_quality["passes_quality"]:
                 raise RuntimeError(
@@ -584,7 +784,9 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
                     f"{seedream_quality['quality_reason']} "
                     f"(outside_change_ratio={seedream_quality.get('outside_change_ratio')}, "
                     f"outside_structure_change_ratio={seedream_quality.get('outside_structure_change_ratio')}, "
-                    f"red_box_residual_ratio={seedream_quality.get('red_box_residual_ratio')})"
+                    f"red_box_residual_ratio={seedream_quality.get('red_box_residual_ratio')}, "
+                    f"seedream_mask_coverage_ratio={seedream_quality.get('seedream_mask_coverage_ratio')}, "
+                    f"seedream_bbox_red_box_iou={seedream_quality.get('seedream_bbox_red_box_iou')})"
                 )
         elif cfg.seedream_mode:
             seedream_quality = {
@@ -594,20 +796,41 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
                 "outside_structure_change_ratio": None,
                 "red_box_residual_ratio": None,
             }
-        diff = localize_change_bbox(
-            str(original_path),
-            str(generated_path),
-            request_bbox,
-            task["anomaly_type"],
-            str(mask_path),
-        )
+        if cfg.seedream_mode:
+            water_mask_bbox = seedream_metadata.get("seedream_water_mask_bbox")
+            if not isinstance(water_mask_bbox, list) or len(water_mask_bbox) != 4:
+                raise RuntimeError("Seedream water mask bbox missing after composition")
+            diff = {
+                "bbox": bbox_to_box_dict(tuple(int(value) for value in water_mask_bbox)),
+                "area": int(seedream_metadata.get("seedream_water_mask_area") or 0),
+                "mask_uri": str(mask_path),
+                "status": "ok",
+                "diff_method": "seedream_water_mask_within_selected_region",
+            }
+        else:
+            diff = localize_change_bbox(
+                str(original_path),
+                str(generated_path),
+                request_bbox,
+                task["anomaly_type"],
+                str(mask_path),
+            )
         refined_bbox = _is_refined_final_bbox(diff["bbox"], request_bbox)
         if not refined_bbox:
             logger.warning(
-                "%s diff localization produced coarse bbox matching expanded_edit_bbox; "
+                "%s localization produced coarse bbox matching the edit region; "
                 "writing metadata for in-repo localizer postprocess",
                 sample_id,
             )
+        final_bbox_source = (
+            "seedream_water_mask_within_selected_region"
+            if cfg.seedream_mode
+            else (
+                "image_difference_within_selected_grid"
+                if refined_bbox
+                else "coarse_expanded_edit_bbox_requires_localizer_postprocess"
+            )
+        )
         crop_info = crop_anomaly(
             str(generated_path),
             diff["bbox"],
@@ -624,12 +847,8 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
             "grid_bbox": list(grid_bbox),
             "expanded_edit_bbox": list(expanded_bbox),
             "prompt_box": list(request_bbox),
-            "final_bbox_source": (
-                "image_difference_within_selected_grid"
-                if refined_bbox
-                else "coarse_expanded_edit_bbox_requires_localizer_postprocess"
-            ),
-            "coarse_bbox_requires_postprocess": not refined_bbox,
+            "final_bbox_source": final_bbox_source,
+            "coarse_bbox_requires_postprocess": False if cfg.seedream_mode else not refined_bbox,
             "diff_method": diff["diff_method"],
             "mask_uri": relative_uri(mask_path),
             "vlm_selection": vlm_result,
@@ -672,6 +891,10 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
             response_log_path,
             mask_path,
             crop_path,
+            extra_artifact_paths={
+                "seedream_raw_output_uri": seedream_raw_path,
+                "seedream_composition_mask_uri": composition_mask_path,
+            },
         ),
     }
     if seedream_quality is not None:

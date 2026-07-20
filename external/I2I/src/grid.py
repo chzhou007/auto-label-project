@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -8,8 +9,37 @@ from PIL import Image, ImageDraw, ImageFont
 from config import VALID_GRIDS
 
 
+def _preview_max_side() -> int:
+    raw = os.getenv("QWEN_GRID_PREVIEW_MAX_SIDE", "1280").strip()
+    if not raw:
+        return 1280
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("QWEN_GRID_PREVIEW_MAX_SIDE must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError("QWEN_GRID_PREVIEW_MAX_SIDE must be a positive integer")
+    return value
+
+
+def _preview_quality() -> int:
+    raw = os.getenv("QWEN_GRID_PREVIEW_JPEG_QUALITY", "80").strip()
+    if not raw:
+        return 80
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("QWEN_GRID_PREVIEW_JPEG_QUALITY must be an integer from 1 to 95") from exc
+    return max(1, min(95, value))
+
+
 def make_grid_preview(image_path: str, output_path: str) -> None:
     image = Image.open(image_path).convert("RGB")
+    max_side = _preview_max_side()
+    width, height = image.size
+    scale = min(1.0, max_side / float(max(width, height)))
+    if scale < 1.0:
+        image = image.resize((max(1, round(width * scale)), max(1, round(height * scale))), Image.Resampling.LANCZOS)
     width, height = image.size
     draw = ImageDraw.Draw(image)
     line_width = max(2, min(width, height) // 300)
@@ -39,7 +69,7 @@ def make_grid_preview(image_path: str, output_path: str) -> None:
             draw.text((cx - tw // 2, cy - th // 2), label, fill=(255, 0, 0), font=font)
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    image.save(output_path, quality=95)
+    image.save(output_path, quality=_preview_quality(), optimize=True)
 
 
 def normalize_grid_id(grid_id: str) -> str:

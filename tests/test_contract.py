@@ -623,7 +623,8 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(body["model"], "doubao-seedream-5-0-pro-260628")
             self.assertEqual(body["image"], str(original_path))
             self.assertNotIn("seedream_local_crop_mode", body)
-            self.assertIn("200x200", body["prompt"])
+            self.assertIn("80-160 px", body["prompt"])
+            self.assertIn("Do not redraw the room", body["prompt"])
             self.assertNotIn("or inside the selected grid", body["prompt"])
             self.assertNotIn("Additional anomaly detail", body["prompt"])
             self.assertNotIn("生成一张真实的工业监控异常图像", body["prompt"])
@@ -697,7 +698,8 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(body["model"], "doubao-seedream-5-0-pro-260628")
             self.assertEqual(body["image"], [str(guide_path), str(reference_path)])
             self.assertNotIn("images", body)
-            self.assertIn("200x200px", body["prompt"])
+            self.assertIn("80-160 px", body["prompt"])
+            self.assertIn("Do not cover or repaint the whole rectangle", body["prompt"])
             self.assertNotIn("Additional anomaly detail", body["prompt"])
             self.assertNotIn("生成一张真实的工业监控异常图像", body["prompt"])
             self.assertEqual(len(seedream_payloads), 1)
@@ -744,8 +746,73 @@ class ContractTests(unittest.TestCase):
             outside_mask = np.ones(original_array.shape[:2], dtype=bool)
             outside_mask[40:68, 40:75] = False
             self.assertTrue(np.array_equal(original_array[outside_mask], composed_array[outside_mask]))
-            self.assertEqual(metadata["seedream_composition_mode"], "source_preserving_bbox_diff_blend")
+            self.assertEqual(metadata["seedream_composition_mode"], "source_preserving_water_mask_blend")
             self.assertEqual(metadata["seedream_composition_bbox"], [40, 40, 75, 68])
+
+    def test_seedream_water_mask_returns_tight_bbox_and_rejects_patch_like_region(self) -> None:
+        from PIL import Image, ImageDraw
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from main import _compose_seedream_source_preserving_output, _validate_seedream_experiment_output
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original_path = root / "original.jpg"
+            raw_path = root / "raw.png"
+            output_path = root / "generated.png"
+            water_mask_path = root / "water_mask.png"
+            composition_mask_path = root / "composition_mask.png"
+
+            original = Image.new("RGB", (240, 180), (130, 132, 128))
+            original.save(original_path)
+            raw = original.copy()
+            draw = ImageDraw.Draw(raw)
+            draw.rectangle((80, 70, 200, 150), fill=(138, 140, 136))
+            draw.ellipse((105, 100, 160, 128), fill=(70, 78, 80))
+            raw.save(raw_path)
+
+            metadata = _compose_seedream_source_preserving_output(
+                original_path,
+                raw_path,
+                output_path,
+                (70, 60, 210, 160),
+                water_mask_output_path=water_mask_path,
+                composition_mask_output_path=composition_mask_path,
+                anomaly_type="water_leak",
+            )
+
+            self.assertTrue(water_mask_path.exists())
+            self.assertTrue(composition_mask_path.exists())
+            self.assertLess(metadata["seedream_bbox_red_box_iou"], 0.35)
+            self.assertLess(metadata["seedream_mask_coverage_ratio"], 0.20)
+            self.assertEqual(metadata["seedream_water_mask_bbox"], [105, 100, 161, 129])
+            quality = _validate_seedream_experiment_output(
+                original_path,
+                output_path,
+                (70, 60, 210, 160),
+                "boxed_fusion",
+                metadata,
+            )
+            self.assertTrue(quality["passes_quality"])
+
+            patch_metadata = {
+                "seedream_mask_coverage_ratio": 0.60,
+                "seedream_bbox_red_box_iou": 0.90,
+                "seedream_patch_like_score": 0.90,
+            }
+            patch_quality = _validate_seedream_experiment_output(
+                original_path,
+                output_path,
+                (70, 60, 210, 160),
+                "boxed_fusion",
+                patch_metadata,
+            )
+            self.assertFalse(patch_quality["passes_quality"])
+            self.assertIn("seedream_patch_like_region", patch_quality["quality_reason"])
 
     def test_seedream_boxed_single_edit_uses_only_guide_input(self) -> None:
         from PIL import Image
@@ -809,8 +876,9 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(body["n"], 1)
             self.assertEqual(body["model"], "doubao-seedream-5-0-pro-260628")
             self.assertEqual(body["image"], str(guide_path))
-            self.assertIn("200x200", body["prompt"])
-            self.assertIn("20 10 60 50", body["prompt"])
+            self.assertIn("80-160 px", body["prompt"])
+            self.assertIn("Do not fill the whole rectangle", body["prompt"])
+            self.assertIn("[20, 10, 60, 50]", body["prompt"])
             self.assertNotIn("images", body)
 
     def test_seedream_red_box_is_bounded_and_deterministic(self) -> None:
@@ -857,6 +925,63 @@ class ContractTests(unittest.TestCase):
         self.assertGreaterEqual(box[1], 380)
         self.assertEqual(box[2] - box[0], 200)
         self.assertEqual(box[3] - box[1], 200)
+
+    def test_qwen_grid_preview_is_downscaled_for_vlm_payload(self) -> None:
+        from PIL import Image
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from grid import make_grid_preview
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_path = root / "large.jpg"
+            preview_path = root / "preview.jpg"
+            Image.new("RGB", (2560, 1440), (120, 130, 140)).save(source_path)
+
+            with patch.dict("os.environ", {"QWEN_GRID_PREVIEW_MAX_SIDE": "640", "QWEN_GRID_PREVIEW_JPEG_QUALITY": "70"}):
+                make_grid_preview(str(source_path), str(preview_path))
+
+            with Image.open(preview_path) as preview:
+                self.assertLessEqual(max(preview.size), 640)
+            self.assertLess(preview_path.stat().st_size, source_path.stat().st_size)
+
+    def test_qwen_vlm_payload_records_and_limits_image_bytes(self) -> None:
+        from PIL import Image
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from config import ModelServiceConfig
+            from qwen_vlm_client import QwenVLMClient
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "preview.jpg"
+            Image.new("RGB", (100, 80), (90, 100, 110)).save(image_path, quality=90)
+            client = QwenVLMClient(
+                "qwen3.6-27b",
+                ModelServiceConfig(
+                    api_key="qwen-test",
+                    provider="openai_compatible",
+                    endpoint="https://deepseek.gds-services.com/v1",
+                    api_key_env="QWEN397B_API_KEY",
+                    endpoint_env="QWEN397B_API_URL",
+                ),
+            )
+
+            with patch.dict("os.environ", {"QWEN397B_IMAGE_MAX_BYTES": "1000000"}):
+                _endpoints, _body, log_body = client._build_request_payloads(str(image_path), "select grid")
+            self.assertEqual(log_body["image_bytes"], image_path.stat().st_size)
+            self.assertEqual(log_body["image_max_bytes"], 1000000)
+
+            with patch.dict("os.environ", {"QWEN397B_IMAGE_MAX_BYTES": "1"}):
+                with self.assertRaisesRegex(RuntimeError, "request image too large"):
+                    client._build_request_payloads(str(image_path), "select grid")
 
     def test_seedream_experiment_quality_rejects_red_residual_and_scene_drift(self) -> None:
         from PIL import Image, ImageDraw

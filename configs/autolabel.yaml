@@ -290,7 +290,7 @@ generation:
   image_model_key: seedream5_image_editor
   grid_layout: 4x4
   edit_bbox_expand_ratio: 0.2
-  crop_expand_ratio: 0.1
+  crop_expand_ratio: 0.03
   workers: 1
   skip_existing: true
   dry_run: false
