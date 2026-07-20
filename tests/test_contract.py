@@ -1791,6 +1791,145 @@ class ContractTests(unittest.TestCase):
             self.assertIn("localizer_used", audit_rows[0])
             self.assertIn("manual_accept", audit_rows[0])
 
+    def test_ingest_generated_metadata_exports_trusted_i2i_seedream_bbox_and_crop(self) -> None:
+        from PIL import Image, ImageDraw
+
+        from autolabel.exporters.labelstudio import export_metadata_dir
+        from autolabel.pipeline import ingest_generated_metadata
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            i2i_output_root = root / "i2i_outputs"
+            metadata_input_dir = i2i_output_root / "metadata"
+            metadata_input_dir.mkdir(parents=True)
+            mask_dir = i2i_output_root / "debug" / "masks"
+            mask_dir.mkdir(parents=True)
+            processed_root = root / "processed"
+            metadata_dir = processed_root / "metadata"
+            original_path = root / "original.jpg"
+            generated_path = i2i_output_root / "generated_images" / "sample_seedream.png"
+            generated_path.parent.mkdir(parents=True)
+            Image.new("RGB", (256, 192), (120, 120, 120)).save(original_path)
+            generated = Image.new("RGB", (256, 192), (120, 120, 120))
+            draw = ImageDraw.Draw(generated)
+            draw.rectangle((100, 95, 150, 130), fill=(170, 190, 200))
+            generated.save(generated_path)
+            mask_path = mask_dir / "sample_seedream_obj_000001_mask.png"
+            mask = Image.new("L", (256, 192), 0)
+            ImageDraw.Draw(mask).rectangle((100, 95, 150, 130), fill=255)
+            mask.save(mask_path)
+
+            manifest_path = root / "manifest.csv"
+            write_csv(
+                manifest_path,
+                [
+                    {
+                        "sample_id": "sample_seedream",
+                        "image_id": "image_seedream",
+                        "image_uri": str(original_path),
+                        "anomaly_type": "water_leak",
+                        "source_type": "manual_upload",
+                        "task_mode": "generation",
+                    }
+                ],
+                ["sample_id", "image_id", "image_uri", "anomaly_type", "source_type", "task_mode"],
+            )
+
+            sample = normalize_autolabel_sample(
+                {
+                    "sample_id": "sample_seedream",
+                    "image_asset": {
+                        "image_id": "image_seedream",
+                        "image_uri": str(generated_path),
+                        "width": 256,
+                        "height": 192,
+                        "source_type": "generated",
+                    },
+                    "objects": [
+                        {
+                            "object_id": "obj_000001",
+                            "object_type": "leakage_area",
+                            "box": {"format": "xyxy", "x1": 100, "y1": 95, "x2": 150, "y2": 130},
+                            "geometry_source": "synthetic_generator",
+                            "geometry_model": {"model_name": "seedream+i2i_diff", "model_version": "test"},
+                            "geometry_detail": {
+                                "polygon": None,
+                                "mask_uri": str(mask_path),
+                                "mask_format": "png",
+                                "generation_params": {
+                                    "prompt_box": [96, 90, 160, 140],
+                                    "final_bbox_source": "image_difference_within_selected_grid",
+                                    "coarse_bbox_requires_postprocess": False,
+                                    "seedream_quality_gate": {
+                                        "passes_quality": True,
+                                        "quality_reason": None,
+                                        "outside_change_ratio": 0.02,
+                                    },
+                                },
+                            },
+                            "crop": {
+                                "crop_id": "crop_000001",
+                                "crop_uri": "pending",
+                                "crop_box": None,
+                                "crop_expand_ratio": None,
+                                "is_valid_crop": False,
+                            },
+                            "classification": {
+                                "multi_labels": [
+                                    {
+                                        "label_key": "anomaly_type",
+                                        "label_value": "water_leak",
+                                        "confidence": 1.0,
+                                        "evidence": "generated label",
+                                    }
+                                ],
+                                "classifier_type": "rule",
+                                "classifier_name": "synthetic_label_rule",
+                                "classifier_version": "test",
+                                "prompt_version": "test",
+                                "raw_response": None,
+                            },
+                            "quality_check": None,
+                        }
+                    ],
+                    "workflow": {"workflow_status": "classified"},
+                    "export": {"export_format": "labelstudio", "export_status": "not_exported"},
+                },
+                pipeline_id="autolabel_dag_v1",
+                pipeline_version="0.1.0",
+            )
+            write_json(metadata_input_dir / "sample_seedream.json", sample)
+
+            config = load_config(ROOT / "configs" / "autolabel.yaml")
+            with patch("autolabel.modules.generation.metadata_builder.create_localizer") as create_localizer:
+                create_localizer.side_effect = AssertionError("trusted i2i bbox should not rerun localizer")
+                written = ingest_generated_metadata(
+                    i2i_output_root,
+                    metadata_dir,
+                    pipeline_config=config,
+                    tasks_csv=manifest_path,
+                    image_root=root,
+                )
+
+            ingested = read_json(written[0])
+            obj = ingested["objects"][0]
+            localizer = obj["geometry_detail"]["generation_params"]["localizer"]
+            self.assertEqual(localizer["used"], "i2i_diff")
+            self.assertEqual(localizer["postprocess_status"], "success")
+            self.assertTrue(localizer["quality"]["passes_quality"])
+            self.assertEqual(obj["box"], {"format": "xyxy", "x1": 100, "y1": 95, "x2": 150, "y2": 130})
+            self.assertFalse(Path(obj["crop"]["crop_uri"]).is_absolute())
+            self.assertTrue((processed_root / obj["crop"]["crop_uri"]).exists())
+            self.assertFalse(Path(obj["geometry_detail"]["mask_uri"]).is_absolute())
+            self.assertTrue((processed_root / obj["geometry_detail"]["mask_uri"]).exists())
+
+            export_path = processed_root / "exports" / "labelstudio" / "import.json"
+            tasks = export_metadata_dir(metadata_dir, export_path, generated_quality_gate=True)
+            self.assertEqual(len(tasks), 1)
+            result = tasks[0]["predictions"][0]["result"][0]
+            self.assertEqual(result["meta"]["box_xyxy"], obj["box"])
+            self.assertEqual(result["meta"]["crop"]["crop_uri"], obj["crop"]["crop_uri"])
+
     def test_crop_review_config_uses_detector_model_profile(self) -> None:
         config = deepcopy(load_config(ROOT / "configs" / "autolabel.yaml"))
         config["direct_annotation"]["crop_review"]["enabled"] = True

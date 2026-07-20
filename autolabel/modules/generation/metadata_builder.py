@@ -245,6 +245,56 @@ def _serialize_mapping(mapping: dict[str, Any] | None, relative_to: str | Path |
     }
 
 
+def _trusted_i2i_quality(generation_params: dict[str, Any], anomaly_type: str) -> dict[str, Any] | None:
+    if bool(generation_params.get("coarse_bbox_requires_postprocess")):
+        return None
+    final_bbox_source = str(generation_params.get("final_bbox_source") or "")
+    if final_bbox_source.startswith("coarse_"):
+        return None
+    seedream_gate = generation_params.get("seedream_quality_gate")
+    if not isinstance(seedream_gate, dict) or not bool(seedream_gate.get("passes_quality")):
+        return None
+
+    outside_change = float(seedream_gate.get("outside_change_ratio") or 0.0)
+    return {
+        "background_preservation_score": max(0.0, min(1.0, 1.0 - outside_change)),
+        "anomaly_visibility_score": 1.0,
+        "passes_quality": True,
+        "quality_reason": None,
+        "quality_threshold_profile": anomaly_type,
+        "seedream_quality_gate": deepcopy(seedream_gate),
+    }
+
+
+def _copy_existing_mask_to_processed(
+    obj: dict[str, Any],
+    sample_id: str,
+    mask_dir: Path,
+    processed_root: str | Path,
+) -> str | None:
+    object_id = str(obj.get("object_id") or "obj")
+    geometry_detail = obj.setdefault("geometry_detail", {})
+    generation_params = geometry_detail.get("generation_params") if isinstance(geometry_detail.get("generation_params"), dict) else {}
+    mask_uri = geometry_detail.get("mask_uri") or generation_params.get("mask_uri")
+    if not isinstance(mask_uri, str) or not mask_uri:
+        return None
+
+    source = resolve_path(mask_uri)
+    if not source.exists() or not source.is_file():
+        return None
+
+    target = mask_dir / f"{sample_id}_{object_id}_mask.png"
+    try:
+        if source.resolve() != target.resolve():
+            ensure_dir(target.parent)
+            shutil.copy2(source, target)
+        else:
+            target = source
+    except FileNotFoundError:
+        return None
+    return _relative_path_string(str(target), processed_root)
+
+
 def _persist_wan_response_artifact(
     processed_root: str | Path,
     sample_id: str,
@@ -493,6 +543,105 @@ def apply_localizer_postprocess(
         reference_bbox = _resolve_reference_bbox(obj, prompt_box)
         reference_mask_uri = _resolve_reference_mask_uri(obj)
         reference_mask_path = str(resolve_path(reference_mask_uri)) if reference_mask_uri else None
+
+        trusted_quality = _trusted_i2i_quality(generation_params, anomaly_type)
+        existing_bbox = _as_box_list([
+            obj.get("box", {}).get("x1"),
+            obj.get("box", {}).get("y1"),
+            obj.get("box", {}).get("x2"),
+            obj.get("box", {}).get("y2"),
+        ])
+        if trusted_quality is not None and existing_bbox is not None:
+            copied_mask_uri = _copy_existing_mask_to_processed(
+                obj,
+                str(processed["sample_id"]),
+                mask_dir,
+                processed_root,
+            )
+            copied_mask_path = str(Path(processed_root) / copied_mask_uri) if copied_mask_uri else reference_mask_path
+            trusted_benchmark = compute_localizer_metrics(
+                final_bbox=existing_bbox,
+                mask_path=copied_mask_path,
+                image_size=image_size,
+                reference_bbox=reference_bbox,
+                reference_mask_path=reference_mask_path,
+            )
+            trusted_metrics = {
+                "localizer_method": "i2i_diff",
+                "final_bbox_source": generation_params.get("final_bbox_source"),
+                "selected_grid": generation_params.get("selected_grid"),
+                "red_box_bbox": generation_params.get("red_box_bbox"),
+                "prompt_box": generation_params.get("prompt_box"),
+            }
+            localizer_block["used"] = "i2i_diff"
+            localizer_block["fallback_used"] = False
+            localizer_block["fallback_trigger"] = None
+            localizer_block["reason"] = None
+            localizer_block["metrics"] = deepcopy(trusted_metrics)
+            localizer_block["benchmark"] = deepcopy(trusted_benchmark)
+            localizer_block["quality"] = deepcopy(trusted_quality)
+            localizer_block["debug_artifacts"] = {}
+            localizer_block["attempts"] = [
+                {
+                    "name": "i2i_diff",
+                    "used": "i2i_diff",
+                    "attempt_role": "i2i",
+                    "success": True,
+                    "localize_success": True,
+                    "reason": None,
+                    "fallback_used": False,
+                    "elapsed_ms": 0.0,
+                    "metrics": deepcopy(trusted_metrics),
+                    "quality": deepcopy(trusted_quality),
+                    "benchmark": deepcopy(trusted_benchmark),
+                    "debug_artifacts": {},
+                }
+            ]
+            localizer_block["postprocess_status"] = "success"
+            generation_params["quality"] = deepcopy(trusted_quality)
+            if copied_mask_uri:
+                obj.setdefault("geometry_detail", {})["mask_uri"] = copied_mask_uri
+                obj["geometry_detail"]["mask_format"] = "png"
+            x1, y1, x2, y2 = existing_bbox
+            obj["box"] = make_box(x1, y1, x2, y2)
+            localizer_rows.append(
+                {
+                    "task_id": task_id,
+                    "sample_id": processed["sample_id"],
+                    "object_id": obj["object_id"],
+                    "anomaly_type": anomaly_type,
+                    "localizer": "i2i_diff",
+                    "localizer_used": "i2i_diff",
+                    "attempt_role": "i2i",
+                    "success": True,
+                    "localize_success": True,
+                    "reason": None,
+                    "failure_reason": None,
+                    "fallback_used": False,
+                    "elapsed_ms": 0.0,
+                    "bbox_iou": float(trusted_benchmark.get("bbox_iou", 0.0)),
+                    "precision": float(trusted_benchmark.get("precision", 0.0)),
+                    "recall": float(trusted_benchmark.get("recall", 0.0)),
+                    "mask_iou": float(trusted_benchmark.get("mask_iou", 0.0)),
+                    "metric_reference_source": trusted_benchmark.get("metric_reference_source", "none"),
+                    "passes_quality": True,
+                    "quality_reason": None,
+                    "quality_threshold_profile": trusted_quality.get("quality_threshold_profile"),
+                    "background_preservation_score": float(trusted_quality.get("background_preservation_score", 0.0)),
+                    "anomaly_visibility_score": float(trusted_quality.get("anomaly_visibility_score", 0.0)),
+                    "pgcd_component_score": None,
+                    "image_uri": str(original_image_uri),
+                    "generated_image_uri": str(generated_image_uri),
+                    "final_bbox": existing_bbox,
+                    "mask_uri": copied_mask_uri,
+                    "crop_uri": None,
+                    "manual_accept": None,
+                    "metrics": deepcopy(trusted_metrics),
+                    "quality": deepcopy(trusted_quality),
+                }
+            )
+            any_box_updated = True
+            continue
 
         attempts: list[dict[str, Any]] = []
 
