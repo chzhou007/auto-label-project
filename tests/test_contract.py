@@ -926,6 +926,32 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(box[2] - box[0], 200)
         self.assertEqual(box[3] - box[1], 200)
 
+    def test_seedream_water_leak_box_rejects_grid_without_floor(self) -> None:
+        from PIL import Image, ImageDraw
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from main import _choose_seedream_water_leak_box
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "cabinet.jpg"
+            image = Image.new("RGB", (640, 640), (230, 230, 225))
+            draw = ImageDraw.Draw(image)
+            for x in range(100, 500, 40):
+                draw.line((x, 200, x, 600), fill=(40, 40, 40), width=3)
+            for y in range(220, 600, 36):
+                draw.line((100, y, 500, y), fill=(40, 40, 40), width=2)
+            for x in range(120, 500, 80):
+                draw.rectangle((x, 250, x + 45, 285), fill=(30, 160, 45))
+                draw.rectangle((x, 330, x + 55, 390), fill=(245, 200, 20))
+            image.save(image_path)
+
+            with self.assertRaisesRegex(ValueError, "no_visible_floor_region"):
+                _choose_seedream_water_leak_box(image_path, "sample_panel", (100, 200, 500, 600), 200, 200)
+
     def test_qwen_grid_preview_is_downscaled_for_vlm_payload(self) -> None:
         from PIL import Image
 
@@ -1498,6 +1524,76 @@ class ContractTests(unittest.TestCase):
             params = written["objects"][0]["geometry_detail"]["generation_params"]
             self.assertEqual(params["selected_grid"], "C2")
             self.assertEqual(params["candidate_grids"], ["C2", "D2", "B2"])
+
+    def test_i2i_seedream_water_leak_skips_without_visible_floor(self) -> None:
+        from PIL import Image, ImageDraw
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from config import PipelineConfig
+            from main import process_task
+            from utils import ensure_output_dirs
+        finally:
+            sys.path.remove(str(src_dir))
+
+        class FakeVLM:
+            def select_grid_with_qwen(self, *_args, **_kwargs):
+                return {
+                    "selected_grid": "C2",
+                    "confidence": 0.98,
+                    "top_candidates": [
+                        {"grid": "C2", "score": 0.98},
+                        {"grid": "D2", "score": 0.90},
+                        {"grid": "B2", "score": 0.85},
+                    ],
+                }
+
+        class FakeWan:
+            model_call_count = 0
+            model_generated_count = 0
+
+            def edit_image_with_wan(self, **_kwargs):
+                raise AssertionError("Seedream should not be called when no floor region is available")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_root = root / "images"
+            output_root = root / "out"
+            image_root.mkdir()
+            original_path = image_root / "source.jpg"
+            image = Image.new("RGB", (160, 120), (235, 235, 230))
+            draw = ImageDraw.Draw(image)
+            for x in range(0, 160, 12):
+                draw.line((x, 0, x, 120), fill=(30, 30, 30), width=1)
+            for y in range(0, 120, 10):
+                draw.line((0, y, 160, y), fill=(30, 30, 30), width=1)
+            draw.rectangle((40, 55, 95, 95), fill=(245, 190, 20))
+            image.save(original_path)
+            dirs = ensure_output_dirs(output_root)
+            cfg = PipelineConfig(
+                tasks=str(root / "tasks.csv"),
+                image_root=str(image_root),
+                output_root=str(output_root),
+                dry_run=False,
+                max_retries=0,
+                seedream_mode="boxed_single_edit",
+                red_box_min_size=30,
+                red_box_max_size=30,
+            )
+            task = {
+                "sample_id": "sample_no_floor",
+                "image_id": "source",
+                "image_uri": str(original_path),
+                "anomaly_type": "water_leak",
+                "source_type": "manual_upload",
+            }
+
+            self.assertIsNone(process_task(task, cfg, dirs, FakeVLM(), FakeWan()))
+            skip_log = read_json(dirs["logs"] / "sample_no_floor_skip.json")
+            self.assertEqual(skip_log["status"], "skipped")
+            self.assertEqual(skip_log["reason"], "no_visible_floor_region")
+            self.assertFalse((dirs["metadata"] / "sample_no_floor.json").exists())
 
     def test_generation_runtime_uses_anomaly_type_localizer_policy(self) -> None:
         config = load_config(ROOT / "configs" / "autolabel.yaml")

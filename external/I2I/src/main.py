@@ -82,6 +82,18 @@ def _write_failure(log_dir: Path, sample_id: str, stage: str, error: Exception |
     logger.error("%s failed at %s: %s", sample_id, stage, error)
 
 
+def _write_skip(log_dir: Path, sample_id: str, reason: str, context: dict | None = None) -> None:
+    payload = {
+        "sample_id": sample_id,
+        "status": "skipped",
+        "stage": "floor_region_precheck",
+        "reason": reason,
+        "context": context or {},
+    }
+    write_json(log_dir / f"{sample_id}_skip.json", payload)
+    logger.info("%s skipped at floor_region_precheck: %s", sample_id, reason)
+
+
 def _failure_artifact_context(
     sample_id: str,
     dirs: dict[str, Path],
@@ -432,12 +444,33 @@ def _choose_seedream_water_leak_box(
     except Exception:
         return fallback
 
+    return _choose_seedream_water_leak_floor_box(rgb, sample_id, grid_bbox, min_size, max_size)
+
+
+def _choose_seedream_water_leak_floor_box(
+    rgb: Image.Image,
+    sample_id: str,
+    grid_bbox: tuple[int, int, int, int],
+    min_size: int,
+    max_size: int,
+) -> tuple[int, int, int, int]:
+    fallback = _choose_seedream_red_box(sample_id, grid_bbox, min_size, max_size, "water_leak")
+    gx1, gy1, gx2, gy2 = grid_bbox
+    grid_width = max(1, gx2 - gx1)
+    grid_height = max(1, gy2 - gy1)
+    upper = max(1, min(int(max_size), grid_width, grid_height))
+    lower = max(1, min(int(min_size), upper))
+    box_size = upper if upper >= lower else lower
+    if grid_width < box_size or grid_height < box_size:
+        raise ValueError("no_visible_floor_region: selected grid is smaller than required water edit box")
+
     x_stop = max(gx1, gx2 - box_size)
     y_stop = max(gy1, gy2 - box_size)
     y_start = min(gy1 + int(grid_height * 0.45), y_stop)
     step = max(8, box_size // 5)
     best_box = fallback
     best_score = float("-inf")
+    best_metrics: dict[str, float] = {}
     for y1 in range(y_start, y_stop + 1, step):
         for x1 in range(gx1, x_stop + 1, step):
             x2 = x1 + box_size
@@ -449,6 +482,13 @@ def _choose_seedream_water_leak_box(
             brightness = maxc
             mean_sat = float(saturation.mean())
             mean_brightness = float(brightness.mean())
+            gray = (0.299 * crop[:, :, 0] + 0.587 * crop[:, :, 1] + 0.114 * crop[:, :, 2])
+            gx = np.zeros_like(gray)
+            gy = np.zeros_like(gray)
+            gx[:, 1:] = np.abs(gray[:, 1:] - gray[:, :-1])
+            gy[1:, :] = np.abs(gray[1:, :] - gray[:-1, :])
+            edge_density = float((np.maximum(gx, gy) > 0.07).mean())
+            smooth_ratio = float((np.maximum(gx, gy) < 0.025).mean())
             red_yellow_green = (
                 ((crop[:, :, 0] > 0.45) & (crop[:, :, 0] > crop[:, :, 1] * 1.15))
                 | ((crop[:, :, 0] > 0.45) & (crop[:, :, 1] > 0.35) & (crop[:, :, 2] < 0.25))
@@ -456,13 +496,55 @@ def _choose_seedream_water_leak_box(
             )
             saturated_equipment_ratio = float((red_yellow_green & (saturation > 0.20)).mean())
             too_dark_ratio = float((brightness < 0.18).mean())
+            max_floor_brightness = float(os.getenv("SEEDREAM_MAX_FLOOR_BRIGHTNESS", "0.86"))
+            too_bright_ratio = float((brightness > max_floor_brightness).mean())
+            low_saturation_ratio = float((saturation < 0.18).mean())
+            floor_like_ratio = float(
+                (
+                    (saturation < 0.22)
+                    & (brightness > 0.18)
+                    & (brightness < max_floor_brightness)
+                    & (np.maximum(gx, gy) < 0.06)
+                ).mean()
+            )
             y_bias = (y1 - gy1) / max(1, grid_height - box_size)
-            score = (1.8 * (1.0 - mean_sat)) + (0.8 * mean_brightness) + (0.7 * y_bias)
+            score = (
+                (1.8 * floor_like_ratio)
+                + (1.0 * low_saturation_ratio)
+                + (0.8 * smooth_ratio)
+                + (0.6 * y_bias)
+                + (0.2 * mean_brightness)
+            )
             score -= 2.5 * saturated_equipment_ratio
             score -= 0.8 * too_dark_ratio
+            score -= 0.6 * too_bright_ratio
+            score -= 1.6 * edge_density
             if score > best_score:
                 best_score = score
                 best_box = (x1, y1, x2, y2)
+                best_metrics = {
+                    "floor_score": float(score),
+                    "floor_like_ratio": floor_like_ratio,
+                    "low_saturation_ratio": low_saturation_ratio,
+                    "smooth_ratio": smooth_ratio,
+                    "edge_density": edge_density,
+                    "saturated_equipment_ratio": saturated_equipment_ratio,
+                    "too_dark_ratio": too_dark_ratio,
+                    "too_bright_ratio": too_bright_ratio,
+                }
+    min_score = float(os.getenv("SEEDREAM_MIN_FLOOR_SCORE", "1.35"))
+    min_floor_ratio = float(os.getenv("SEEDREAM_MIN_FLOOR_LIKE_RATIO", "0.45"))
+    max_edge_density = float(os.getenv("SEEDREAM_MAX_FLOOR_EDGE_DENSITY", "0.18"))
+    if (
+        best_score < min_score
+        or best_metrics.get("floor_like_ratio", 0.0) < min_floor_ratio
+        or best_metrics.get("edge_density", 1.0) > max_edge_density
+    ):
+        raise ValueError(
+            "no_visible_floor_region: selected grid has no reliable floor patch "
+            f"(score={best_score:.3f}, floor_like_ratio={best_metrics.get('floor_like_ratio', 0.0):.3f}, "
+            f"edge_density={best_metrics.get('edge_density', 1.0):.3f})"
+        )
     return best_box
 
 
@@ -645,7 +727,7 @@ def _validate_seedream_experiment_output(
     return result
 
 
-def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: QwenVLMClient, wan: WanImageClient) -> bool:
+def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: QwenVLMClient, wan: WanImageClient) -> bool | None:
     sample_id = task["sample_id"]
     stale_metadata = dirs["metadata"] / f"{sample_id}.json"
     failure_log = dirs["logs"] / f"{sample_id}_failure.json"
@@ -695,22 +777,50 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
     candidate_grids = _candidate_grids(vlm_result)
     grid_id = str(vlm_result["selected_grid"]).strip().upper()
     try:
-        grid_bbox = grid_id_to_bbox(grid_id, width, height)
+        seedream_reference_paths: list[str] = []
+        seedream_metadata: dict = {}
+        red_box_bbox: tuple[int, int, int, int] | None = None
+        floor_rejections: list[dict[str, str]] = []
+        if cfg.seedream_mode in {"boxed_single_edit", "boxed_fusion"} and task["anomaly_type"] == "water_leak":
+            for candidate_grid in candidate_grids:
+                candidate_grid = str(candidate_grid).strip().upper()
+                try:
+                    candidate_grid_bbox = grid_id_to_bbox(candidate_grid, width, height)
+                    candidate_red_box = _choose_seedream_water_leak_box(
+                        original_path,
+                        sample_id,
+                        candidate_grid_bbox,
+                        cfg.red_box_min_size,
+                        cfg.red_box_max_size,
+                    )
+                    grid_id = candidate_grid
+                    grid_bbox = candidate_grid_bbox
+                    red_box_bbox = candidate_red_box
+                    break
+                except ValueError as exc:
+                    if "no_visible_floor_region" not in str(exc):
+                        raise
+                    floor_rejections.append({"grid": candidate_grid, "reason": str(exc)})
+            else:
+                _write_skip(
+                    dirs["logs"],
+                    sample_id,
+                    "no_visible_floor_region",
+                    {
+                        "vlm_result": vlm_result,
+                        "candidate_grids": candidate_grids,
+                        "floor_rejections": floor_rejections,
+                    },
+                )
+                return None
+        else:
+            grid_bbox = grid_id_to_bbox(grid_id, width, height)
+
         expanded_bbox = expand_bbox(grid_bbox, width, height, cfg.edit_bbox_expand_ratio)
         request_image_path = original_path
         request_bbox = expanded_bbox
-        seedream_reference_paths: list[str] = []
-        seedream_metadata: dict = {}
         if cfg.seedream_mode in {"boxed_single_edit", "boxed_fusion"}:
-            if task["anomaly_type"] == "water_leak":
-                red_box_bbox = _choose_seedream_water_leak_box(
-                    original_path,
-                    sample_id,
-                    grid_bbox,
-                    cfg.red_box_min_size,
-                    cfg.red_box_max_size,
-                )
-            else:
+            if red_box_bbox is None:
                 red_box_bbox = _choose_seedream_red_box(
                     sample_id,
                     grid_bbox,
@@ -935,10 +1045,11 @@ def main() -> int:
 
     ok = 0
     failed = 0
+    floor_skipped = 0
     workers = max(1, cfg.workers)
     logger.info("processing %s tasks with workers=%s skipped_existing=%s", len(runnable_tasks), workers, skipped)
 
-    def run_one(task: dict) -> tuple[str, bool, int, int]:
+    def run_one(task: dict) -> tuple[str, bool | None, int, int]:
         vlm = QwenVLMClient(cfg.vlm_model, services.vlm, dry_run=cfg.dry_run)
         wan = WanImageClient(cfg.image_model, services.image, dry_run=cfg.dry_run)
         try:
@@ -965,8 +1076,10 @@ def main() -> int:
             _, success, calls, generated = run_one(task)
             model_call_count += calls
             model_generated_count += generated
-            if success:
+            if success is True:
                 ok += 1
+            elif success is None:
+                floor_skipped += 1
             else:
                 failed += 1
     else:
@@ -978,8 +1091,10 @@ def main() -> int:
                 model_call_count += calls
                 model_generated_count += generated
                 completed += 1
-                if success:
+                if success is True:
                     ok += 1
+                elif success is None:
+                    floor_skipped += 1
                 else:
                     failed += 1
                 logger.info(
@@ -988,7 +1103,7 @@ def main() -> int:
                     len(runnable_tasks),
                     ok,
                     failed,
-                    skipped,
+                    skipped + floor_skipped,
                     sample_id,
                 )
 
@@ -999,7 +1114,9 @@ def main() -> int:
         "processed": len(runnable_tasks),
         "succeeded": ok,
         "failed": failed,
-        "skipped": skipped,
+        "skipped": skipped + floor_skipped,
+        "skipped_existing": skipped,
+        "skipped_no_floor_region": floor_skipped,
         "model_call_count": model_call_count,
         "model_generated_count": model_generated_count,
         "final_generated_count": final_generated_count,
