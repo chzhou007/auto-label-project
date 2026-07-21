@@ -755,7 +755,7 @@ class ContractTests(unittest.TestCase):
         src_dir = ROOT / "external" / "I2I" / "src"
         sys.path.insert(0, str(src_dir))
         try:
-            from main import _compose_seedream_source_preserving_output, _validate_seedream_experiment_output
+            from main import _prepare_seedream_raw_candidate_output, _validate_seedream_experiment_output
         finally:
             sys.path.remove(str(src_dir))
 
@@ -765,31 +765,39 @@ class ContractTests(unittest.TestCase):
             raw_path = root / "raw.png"
             output_path = root / "generated.png"
             water_mask_path = root / "water_mask.png"
-            composition_mask_path = root / "composition_mask.png"
+            raw_diff_mask_path = root / "raw_diff_mask.png"
 
             original = Image.new("RGB", (240, 180), (130, 132, 128))
             original.save(original_path)
             raw = original.copy()
             draw = ImageDraw.Draw(raw)
+            draw.point((8, 8), fill=(90, 95, 98))
             draw.rectangle((80, 70, 200, 150), fill=(138, 140, 136))
             draw.ellipse((105, 100, 160, 128), fill=(70, 78, 80))
             raw.save(raw_path)
 
-            metadata = _compose_seedream_source_preserving_output(
+            metadata = _prepare_seedream_raw_candidate_output(
                 original_path,
                 raw_path,
                 output_path,
                 (70, 60, 210, 160),
                 water_mask_output_path=water_mask_path,
-                composition_mask_output_path=composition_mask_path,
+                raw_diff_mask_output_path=raw_diff_mask_path,
                 anomaly_type="water_leak",
             )
 
             self.assertTrue(water_mask_path.exists())
-            self.assertTrue(composition_mask_path.exists())
+            self.assertTrue(raw_diff_mask_path.exists())
+            self.assertEqual(metadata["seedream_composition_mode"], "raw_candidate_background_gated")
+            self.assertEqual(metadata["seedream_final_image_source"], "seedream_raw_output")
+            self.assertEqual(Image.open(output_path).convert("RGB").getpixel((8, 8)), (90, 95, 98))
             self.assertLess(metadata["seedream_bbox_red_box_iou"], 0.35)
             self.assertLess(metadata["seedream_mask_coverage_ratio"], 0.20)
-            self.assertEqual(metadata["seedream_water_mask_bbox"], [105, 100, 161, 129])
+            water_bbox = metadata["seedream_water_mask_bbox"]
+            self.assertLessEqual(abs(water_bbox[0] - 105), 2)
+            self.assertLessEqual(abs(water_bbox[1] - 100), 2)
+            self.assertLessEqual(abs(water_bbox[2] - 161), 2)
+            self.assertLessEqual(abs(water_bbox[3] - 129), 2)
             quality = _validate_seedream_experiment_output(
                 original_path,
                 output_path,

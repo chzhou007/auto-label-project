@@ -50,6 +50,7 @@ def ensure_output_dirs(output_root: str | Path) -> dict[str, Path]:
         "seedream_guides": root / "debug" / "seedream_guides",
         "seedream_references": root / "debug" / "seedream_references",
         "seedream_composition_masks": root / "debug" / "seedream_composition_masks",
+        "seedream_raw_diff_masks": root / "debug" / "seedream_raw_diff_masks",
         "metadata": root / "metadata",
         "logs": root / "logs",
         "requests": root / "logs" / "requests",
