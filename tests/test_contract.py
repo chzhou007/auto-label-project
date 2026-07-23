@@ -708,6 +708,51 @@ class ContractTests(unittest.TestCase):
             self.assertTrue(seedream_payloads[0]["image"][1].startswith("data:image/png;base64,"))
             self.assertNotIn("images", seedream_payloads[0])
 
+    def test_seedream_auth_error_mentions_ark_api_key(self) -> None:
+        from PIL import Image
+
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from config import ModelServiceConfig
+            from wan_image_client import WanImageClient
+        finally:
+            sys.path.remove(str(src_dir))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "source.jpg"
+            response_log_path = root / "response.json"
+            Image.new("RGB", (100, 80), (70, 80, 90)).save(image_path)
+            client = WanImageClient(
+                "doubao-seedream-5-0-pro-260628",
+                ModelServiceConfig(
+                    api_key="bad-key",
+                    provider="volcengine_ark",
+                    endpoint="https://ark.cn-beijing.volces.com/api/v3",
+                    api_key_env="ARK_API_KEY",
+                    endpoint_env="SEEDREAM_BASE_URL",
+                ),
+            )
+
+            with patch("wan_image_client._generate_seedream_with_openai_sdk", side_effect=RuntimeError("Error code: 401 - Unauthorized")):
+                with self.assertRaisesRegex(RuntimeError, "ARK_API_KEY"):
+                    client.edit_image_with_wan(
+                        image_path=str(image_path),
+                        prompt="add water stain",
+                        negative_prompt="",
+                        bbox=(20, 10, 60, 50),
+                        output_path=str(root / "generated.png"),
+                        anomaly_type="water_leak",
+                        response_log_path=str(response_log_path),
+                        seedream_mode="single_image_edit",
+                    )
+
+            response_log = read_json(response_log_path)
+            self.assertEqual(response_log["error"], "seedream_authentication_failed")
+            self.assertEqual(response_log["status_code"], 401)
+            self.assertEqual(response_log["api_key_env"], "ARK_API_KEY")
+
     def test_seedream_reference_copy_path_uses_short_stable_name(self) -> None:
         src_dir = ROOT / "external" / "I2I" / "src"
         sys.path.insert(0, str(src_dir))

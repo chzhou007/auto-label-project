@@ -370,6 +370,23 @@ def _generate_seedream_with_openai_sdk(endpoint: str, api_key: str, request_payl
     return _response_to_dict(response)
 
 
+def _is_seedream_auth_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if status_code == 401:
+        return True
+    message = str(exc).lower()
+    return "401" in message and ("unauthorized" in message or "authentication" in message or "api key" in message)
+
+
+def _seedream_auth_error_message(config: ModelServiceConfig | DashScopeConfig) -> str:
+    env_name = getattr(config, "api_key_env", None) or "ARK_API_KEY"
+    return (
+        "Seedream authentication failed: Ark returned HTTP 401. "
+        f"Check that {env_name} is set to a valid Volcengine Ark API key for the current shell. "
+        "If you use an alias, SEEDREAM_API_KEY is also supported by the bundled config."
+    )
+
+
 def _seedream_size_from_env() -> str | None:
     size = os.getenv("SEEDREAM_SIZE", "").strip()
     if not size:
@@ -643,7 +660,21 @@ class WanImageClient:
         try:
             self.model_call_count += 1
             if is_seedream:
-                raw = _generate_seedream_with_openai_sdk(endpoint, self.config.api_key, request_payload)
+                try:
+                    raw = _generate_seedream_with_openai_sdk(endpoint, self.config.api_key, request_payload)
+                except Exception as exc:
+                    if _is_seedream_auth_error(exc):
+                        auth_error = {
+                            "error": "seedream_authentication_failed",
+                            "status_code": 401,
+                            "message": _seedream_auth_error_message(self.config),
+                            "api_key_env": getattr(self.config, "api_key_env", None),
+                            "original_error": str(exc),
+                        }
+                        if response_log_path:
+                            write_json(response_log_path, auth_error)
+                        raise RuntimeError(auth_error["message"]) from exc
+                    raise
             else:
                 response = requests.post(endpoint, headers=headers, json=request_payload, timeout=180)
                 try:
