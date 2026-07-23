@@ -708,6 +708,25 @@ class ContractTests(unittest.TestCase):
             self.assertTrue(seedream_payloads[0]["image"][1].startswith("data:image/png;base64,"))
             self.assertNotIn("images", seedream_payloads[0])
 
+    def test_seedream_reference_copy_path_uses_short_stable_name(self) -> None:
+        src_dir = ROOT / "external" / "I2I" / "src"
+        sys.path.insert(0, str(src_dir))
+        try:
+            from main import _seedream_reference_copy_path
+        finally:
+            sys.path.remove(str(src_dir))
+
+        long_sample_id = "water_leak_0003_" + ("sample_A1-_A1-CH-A-03-03_AI__10.72.214.212_" * 3)
+        long_reference = Path(
+            "water_leak_0001_sample_A1-_A1-CH-A-01-03_AI__10.72.214.210_17840825901473.png"
+        )
+        copy_path = _seedream_reference_copy_path(long_reference, long_sample_id, Path("seedream_references"))
+
+        self.assertEqual(copy_path.parent, Path("seedream_references"))
+        self.assertEqual(copy_path.suffix, ".png")
+        self.assertLessEqual(len(copy_path.name), len("ref_") + 16 + len(".png"))
+        self.assertEqual(copy_path, _seedream_reference_copy_path(long_reference, long_sample_id, Path("seedream_references")))
+
     def test_seedream_source_preserving_composition_keeps_outside_bbox_unchanged(self) -> None:
         import numpy as np
         from PIL import Image, ImageDraw

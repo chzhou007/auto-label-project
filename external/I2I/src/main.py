@@ -813,6 +813,12 @@ def _select_water_reference(reference_dir: str | Path | None, sample_id: str) ->
     return candidates[int(digest[:8], 16) % len(candidates)]
 
 
+def _seedream_reference_copy_path(reference_path: Path, sample_id: str, output_dir: Path) -> Path:
+    suffix = reference_path.suffix.lower() if reference_path.suffix else ".png"
+    digest = hashlib.sha256(f"{sample_id}|{reference_path.name}".encode("utf-8")).hexdigest()[:16]
+    return output_dir / f"ref_{digest}{suffix}"
+
+
 def _red_pixel_ratio(image_path: str | Path, bbox: tuple[int, int, int, int]) -> float:
     with Image.open(image_path) as image:
         array = np.asarray(image.convert("RGB"))
@@ -1074,10 +1080,15 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
             }
             if cfg.seedream_mode == "boxed_fusion":
                 reference_path = _select_water_reference(cfg.water_reference_dir, sample_id)
-                reference_copy_path = dirs["seedream_references"] / f"{sample_id}_{reference_path.name}"
+                reference_copy_path = _seedream_reference_copy_path(
+                    reference_path,
+                    sample_id,
+                    dirs["seedream_references"],
+                )
                 copy_file(reference_path, reference_copy_path)
                 seedream_reference_paths = [str(reference_copy_path)]
                 seedream_metadata["water_reference_uri"] = relative_uri(reference_copy_path)
+                seedream_metadata["water_reference_source_uri"] = str(reference_path)
         elif cfg.seedream_mode == "single_image_edit":
             seedream_metadata = {
                 "experimental_seedream": True,
