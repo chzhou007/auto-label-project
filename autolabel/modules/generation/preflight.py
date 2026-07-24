@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
+import subprocess
 from typing import Any
 
 from ...model_config import get_credentials, resolve_generation_runtime
@@ -139,6 +141,120 @@ def _credential_report(config: dict[str, Any], profile: dict[str, Any]) -> dict[
     }
 
 
+def _is_mmseg_selector(runtime: dict[str, Any]) -> bool:
+    return str(runtime.get("selector_backend") or "").strip() == "mmseg_floor_selector"
+
+
+def _resolve_executable(value: str | None) -> str | None:
+    if not value:
+        return None
+    candidate = Path(str(value))
+    if candidate.is_file():
+        return str(candidate.resolve())
+    return shutil.which(str(value))
+
+
+def _resolve_runtime_file(value: Any) -> Path | None:
+    if value in ("", None):
+        return None
+    return Path(str(value)).resolve()
+
+
+def _validate_mmseg_selector(runtime: dict[str, Any], require_runtime: bool) -> dict[str, Any] | None:
+    if not _is_mmseg_selector(runtime):
+        return None
+    profile = runtime.get("selector_profile", {}) if isinstance(runtime.get("selector_profile"), dict) else {}
+    report = {
+        "python": profile.get("python"),
+        "worker": profile.get("worker"),
+        "config": profile.get("config"),
+        "checkpoint": profile.get("checkpoint"),
+        "device": profile.get("device"),
+    }
+    if not require_runtime:
+        return report
+
+    python_executable = _resolve_executable(str(profile.get("python") or ""))
+    if not python_executable:
+        raise GenerationPreflightError(
+            "MMSeg floor selector Python not found. Set MMSEG_FLOOR_PYTHON or "
+            "--generation-floor-python to a Python 3.10 OpenMMLab environment."
+        )
+    worker = _resolve_runtime_file(profile.get("worker"))
+    config_path = _resolve_runtime_file(profile.get("config"))
+    checkpoint = _resolve_runtime_file(profile.get("checkpoint"))
+    for label, path in (("worker", worker), ("config", config_path), ("checkpoint", checkpoint)):
+        if path is None or not path.is_file():
+            raise GenerationPreflightError(f"MMSeg floor selector {label} not found: {path}")
+
+    check = subprocess.run(
+        [
+            python_executable,
+            "-c",
+            "import torch, mmcv, mmengine, mmseg; "
+            "assert tuple(int(x) for x in mmseg.__version__.split('.')[:2]) >= (1, 0)",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    if check.returncode != 0:
+        detail = check.stderr.strip() or check.stdout.strip() or f"exit code {check.returncode}"
+        raise GenerationPreflightError(f"MMSeg floor selector environment check failed: {detail}")
+    compatibility = subprocess.run(
+        [
+            python_executable,
+            str(worker),
+            "--check-only",
+            "--config",
+            str(config_path),
+            "--checkpoint",
+            str(checkpoint),
+            "--device",
+            str(profile.get("device") or "cuda:0"),
+            "--model-name",
+            str(runtime.get("selector_model_name") or "segformer_mit-b0-roadline1000"),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=300,
+    )
+    if compatibility.returncode != 0:
+        detail = (
+            compatibility.stderr.strip()
+            or compatibility.stdout.strip()
+            or f"exit code {compatibility.returncode}"
+        )
+        raise GenerationPreflightError(f"MMSeg floor selector checkpoint compatibility check failed: {detail}")
+    report.update(
+        {
+            "python": python_executable,
+            "worker": str(worker),
+            "config": str(config_path),
+            "checkpoint": str(checkpoint),
+            "compatibility": compatibility.stdout.strip(),
+        }
+    )
+    return report
+
+
+def _validate_mmseg_edit_box(runtime: dict[str, Any], seedream_cfg: dict[str, Any]) -> None:
+    if not _is_mmseg_selector(runtime):
+        return
+    mode = str(seedream_cfg.get("mode") or "").strip()
+    if mode not in {"boxed_single_edit", "boxed_fusion"}:
+        return
+    minimum = int(seedream_cfg.get("red_box_min_size", 200))
+    maximum = int(seedream_cfg.get("red_box_max_size", 200))
+    if minimum != 200 or maximum != 200:
+        raise GenerationPreflightError(
+            "MMSeg floor selection requires a fixed 200x200 edit box; "
+            f"got min={minimum}, max={maximum}"
+        )
+
+
 def run_generation_preflight(
     config: dict[str, Any],
     tasks_csv: str | Path,
@@ -198,14 +314,22 @@ def run_generation_preflight(
     _validate_seedream_experiment_assets(seedream_cfg)
     runtime_by_anomaly: dict[str, dict[str, Any]] = {}
     credential_checks: list[dict[str, Any]] = []
+    selector_checks: list[dict[str, Any]] = []
     for anomaly_type in anomaly_types:
         runtime = resolve_generation_runtime(config, anomaly_type=anomaly_type)
         _validate_seedream_profile(runtime, require_credentials=require_credentials, seedream_cfg=seedream_cfg)
+        _validate_mmseg_edit_box(runtime, seedream_cfg)
+        selector_check = _validate_mmseg_selector(runtime, require_runtime=require_credentials)
+        if selector_check is not None:
+            selector_checks.append(selector_check)
         runtime_by_anomaly[anomaly_type] = {
+            "selector_backend": runtime.get("selector_backend"),
+            "selector_model_name": runtime.get("selector_model_name"),
             "vlm_model_name": runtime.get("vlm_model_name"),
             "image_model_name": runtime.get("image_model_name"),
         }
-        credential_checks.append(_credential_report(config, runtime.get("vlm_profile", {})))
+        if not _is_mmseg_selector(runtime):
+            credential_checks.append(_credential_report(config, runtime.get("selector_profile", {})))
         credential_checks.append(_credential_report(config, runtime.get("image_profile", {})))
 
     missing_credentials = [
@@ -230,4 +354,5 @@ def run_generation_preflight(
         "i2i_project_dir_env": os.getenv("I2I_PROJECT_DIR"),
         "output_root": str(output_path),
         "credential_checks": credential_checks,
+        "selector_checks": selector_checks,
     }

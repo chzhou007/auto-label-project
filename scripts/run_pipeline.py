@@ -34,9 +34,13 @@ def main() -> int:
     parser.add_argument("--image-root", default=None)
     parser.add_argument("--processed-root", default=None)
     parser.add_argument("--generation-output-root", default=None)
+    parser.add_argument("--generation-selector-key", default=None)
     parser.add_argument("--generation-vlm-model-key", default=None)
     parser.add_argument("--generation-image-model-key", default=None)
     parser.add_argument("--generation-workers", type=int, default=None)
+    parser.add_argument("--generation-floor-python", default=None)
+    parser.add_argument("--generation-floor-checkpoint", default=None)
+    parser.add_argument("--generation-floor-device", default=None)
     parser.add_argument(
         "--generation-seedream-mode",
         choices=["single_image_edit", "boxed_single_edit", "boxed_fusion"],
@@ -64,9 +68,13 @@ def main() -> int:
     configure_processed_root(config, args.processed_root)
     apply_generation_run_overrides(
         config,
+        selector_key=args.generation_selector_key,
         vlm_model_key=args.generation_vlm_model_key,
         image_model_key=args.generation_image_model_key,
         workers=args.generation_workers,
+        floor_python=args.generation_floor_python,
+        floor_checkpoint=args.generation_floor_checkpoint,
+        floor_device=args.generation_floor_device,
         seedream_mode=args.generation_seedream_mode,
         water_reference_dir=args.generation_water_reference_dir,
         red_box_max_size=args.generation_red_box_max_size,

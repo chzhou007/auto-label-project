@@ -33,21 +33,38 @@ def configure_processed_root(config: dict[str, Any], processed_root: str | Path 
 def apply_generation_run_overrides(
     config: dict[str, Any],
     *,
+    selector_key: str | None = None,
     vlm_model_key: str | None = None,
     image_model_key: str | None = None,
     workers: int | None = None,
+    floor_python: str | None = None,
+    floor_checkpoint: str | None = None,
+    floor_device: str | None = None,
     seedream_mode: str | None = None,
     water_reference_dir: str | None = None,
     red_box_max_size: int | None = None,
     red_box_min_size: int | None = None,
 ) -> dict[str, Any]:
     generation_cfg = config.setdefault("generation", {})
+    if selector_key:
+        generation_cfg["selector_key"] = selector_key
     if vlm_model_key:
         generation_cfg["vlm_model_key"] = vlm_model_key
+        active_vlm = config.get("models", {}).get("generation", {}).get("active_vlm")
+        if selector_key is None and vlm_model_key != active_vlm:
+            generation_cfg["selector_key"] = "qwen_grid_selector"
     if image_model_key:
         generation_cfg["image_model_key"] = image_model_key
     if workers is not None:
         generation_cfg["workers"] = int(workers)
+    if any(value is not None for value in (floor_python, floor_checkpoint, floor_device)):
+        floor_cfg = generation_cfg.setdefault("floor_selector", {})
+        if floor_python is not None:
+            floor_cfg["python"] = str(floor_python)
+        if floor_checkpoint is not None:
+            floor_cfg["checkpoint"] = str(floor_checkpoint)
+        if floor_device is not None:
+            floor_cfg["device"] = str(floor_device)
     if any(value is not None for value in (seedream_mode, water_reference_dir, red_box_max_size, red_box_min_size)):
         seedream_cfg = generation_cfg.setdefault("seedream", {})
         if seedream_mode is not None:
@@ -107,7 +124,7 @@ def run_generation_branch(
             )
         else:
             model_pairs = [
-                f"{anomaly}:{runtime.get('vlm_model_name')}->{runtime.get('image_model_name')}"
+                f"{anomaly}:{runtime.get('selector_model_name')}->{runtime.get('image_model_name')}"
                 for anomaly, runtime in sorted((report.get("runtime_by_anomaly") or {}).items())
             ]
             print(

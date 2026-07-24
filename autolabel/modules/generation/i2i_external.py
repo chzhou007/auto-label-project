@@ -90,7 +90,8 @@ class ExternalI2IGenerationModule:
         return group_generation_rows_by_localizer_policy(self.pipeline_config, rows)
 
     def build_extra_cli_args(self, runtime: dict[str, Any]) -> list[str]:
-        args = [str(arg) for arg in runtime.get("extra_cli_args", []) if str(arg)]
+        args = [str(arg) for arg in runtime.get("selector_cli_args", []) if str(arg)]
+        args.extend(str(arg) for arg in runtime.get("extra_cli_args", []) if str(arg))
         seedream_cfg = self.pipeline_config.get("generation", {}).get("seedream", {})
         if isinstance(seedream_cfg, dict):
             mode = str(seedream_cfg.get("mode") or "").strip()
@@ -150,7 +151,7 @@ class ExternalI2IGenerationModule:
                 tasks_csv=filtered_tasks,
                 image_root=image_root,
                 output_root=output_root,
-                vlm_model=runtime["vlm_model_name"],
+                vlm_model=runtime.get("vlm_model_name") or "selector_not_vlm",
                 image_model=runtime["image_model_name"],
                 grid_layout=generation_cfg.get("grid_layout", "4x4"),
                 edit_bbox_expand_ratio=float(generation_cfg.get("edit_bbox_expand_ratio", 0.20)),

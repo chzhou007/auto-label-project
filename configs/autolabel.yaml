@@ -129,8 +129,28 @@ modules:
 # 模型注册表。新增或替换模型时，只改这里和下面的 active/model_ref。
 models:
   generation:
+    active_selector: mmseg_floor_selector
     active_vlm: qwen_grid_selector
     active_image_generator: seedream5_image_editor
+    selectors:
+      mmseg_floor_selector:
+        provider: local_mmseg_worker
+        model_name: segformer_mit-b0-roadline1000
+        model_version: best_mIoU_iter_3000
+        python: ${MMSEG_FLOOR_PYTHON}
+        worker: external/floor_segmentation/worker.py
+        config: external/floor_segmentation/configs/segformer_mit-b0_roadline_inference.py
+        checkpoint: ${MMSEG_FLOOR_CHECKPOINT}
+        device: ${MMSEG_FLOOR_DEVICE:-cuda:0}
+        road_class_id: 2
+        line_class_id: 1
+        road_coverage_min: 0.95
+        line_coverage_max: 0.05
+
+      qwen_grid_selector:
+        provider: qwen_vlm
+        model_ref: qwen_grid_selector
+
     vlm:
       qwen_grid_selector:
         provider: openai_compatible
@@ -286,6 +306,7 @@ preprocess:
 
 generation:
   enabled: true
+  selector_key: mmseg_floor_selector
   vlm_model_key: qwen_grid_selector
   image_model_key: seedream5_image_editor
   grid_layout: 4x4

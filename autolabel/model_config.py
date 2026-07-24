@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import os
+from pathlib import Path
 from typing import Any
 
 
@@ -114,13 +115,69 @@ def resolve_localizer_config(config: dict[str, Any], anomaly_type: str | None = 
 
 def resolve_generation_runtime(config: dict[str, Any], anomaly_type: str | None = None) -> dict[str, Any]:
     generation_cfg = config.get("generation", {})
-    _, vlm_profile = get_model_profile(
-        config,
-        group="generation",
-        collection="vlm",
-        active_key_field="active_vlm",
-        explicit_key=generation_cfg.get("vlm_model_key"),
+    generation_models = config.get("models", {}).get("generation", {})
+    selector_key = generation_cfg.get("selector_key") or generation_models.get("active_selector")
+    legacy_vlm_key = generation_cfg.get("vlm_model_key")
+    legacy_vlm_override = bool(
+        legacy_vlm_key and legacy_vlm_key != generation_models.get("active_vlm")
     )
+    if legacy_vlm_override and selector_key == "mmseg_floor_selector":
+        selector_key = "qwen_grid_selector"
+    selector_profiles = generation_models.get("selectors", {})
+    selector_profile = selector_profiles.get(selector_key) if selector_key else None
+    vlm_profile: dict[str, Any] = {}
+    if isinstance(selector_profile, dict):
+        selector_profile = deepcopy(selector_profile)
+        selector_provider = str(selector_profile.get("provider") or "").strip().lower()
+        if selector_provider in {"qwen_vlm", "openai_compatible", "vlm"}:
+            vlm_key = generation_cfg.get("vlm_model_key") or selector_profile.get("model_ref")
+            _, vlm_profile = get_model_profile(
+                config,
+                group="generation",
+                collection="vlm",
+                active_key_field="active_vlm",
+                explicit_key=vlm_key,
+            )
+            selector_profile = deep_merge(vlm_profile, selector_profile)
+    else:
+        selector_key, vlm_profile = get_model_profile(
+            config,
+            group="generation",
+            collection="vlm",
+            active_key_field="active_vlm",
+            explicit_key=generation_cfg.get("vlm_model_key"),
+        )
+        selector_profile = deep_merge(vlm_profile, {"provider": "qwen_vlm", "model_ref": selector_key})
+
+    if (
+        anomaly_type
+        and anomaly_type != "water_leak"
+        and str(selector_profile.get("provider") or "").strip().lower()
+        in {"local_mmseg_worker", "mmseg_floor_selector", "mmseg"}
+    ):
+        vlm_key, vlm_profile = get_model_profile(
+            config,
+            group="generation",
+            collection="vlm",
+            active_key_field="active_vlm",
+            explicit_key=generation_cfg.get("vlm_model_key"),
+        )
+        selector_key = vlm_key
+        selector_profile = deep_merge(vlm_profile, {"provider": "qwen_vlm", "model_ref": vlm_key})
+
+    floor_selector_override = generation_cfg.get("floor_selector")
+    if isinstance(floor_selector_override, dict):
+        selector_profile = deep_merge(selector_profile, floor_selector_override)
+
+    if not vlm_profile:
+        _, vlm_profile = get_model_profile(
+            config,
+            group="generation",
+            collection="vlm",
+            active_key_field="active_vlm",
+            explicit_key=generation_cfg.get("vlm_model_key"),
+        )
+
     _, image_profile = get_model_profile(
         config,
         group="generation",
@@ -130,7 +187,7 @@ def resolve_generation_runtime(config: dict[str, Any], anomaly_type: str | None 
     )
 
     env = {}
-    for profile in (vlm_profile, image_profile):
+    for profile in (selector_profile, image_profile):
         credential = get_credentials(config, profile.get("credential_ref"))
         api_key_env_names = _normalize_env_names(profile.get("api_key_env") or credential.get("api_key_env"))
         api_key_env_names.extend(
@@ -155,9 +212,25 @@ def resolve_generation_runtime(config: dict[str, Any], anomaly_type: str | None 
                 env[endpoint_env] = endpoint
 
     localizer_cfg = resolve_localizer_config(config, anomaly_type=anomaly_type)
+    selector_provider = str(selector_profile.get("provider") or "").strip().lower()
+    selector_backend = (
+        "mmseg_floor_selector"
+        if selector_provider in {"local_mmseg_worker", "mmseg_floor_selector", "mmseg"}
+        else "qwen_grid_selector"
+    )
+    selector_model_name = selector_profile.get("model_name")
 
     return {
-        "vlm_model_name": vlm_profile.get("model_name"),
+        "selector_key": selector_key,
+        "selector_backend": selector_backend,
+        "selector_model_name": selector_model_name,
+        "selector_profile": selector_profile,
+        "selector_cli_args": build_generation_selector_cli_args(
+            selector_backend,
+            selector_model_name,
+            selector_profile,
+        ),
+        "vlm_model_name": vlm_profile.get("model_name") if vlm_profile else None,
         "image_model_name": image_profile.get("model_name"),
         "vlm_profile": vlm_profile,
         "image_profile": image_profile,
@@ -169,6 +242,40 @@ def resolve_generation_runtime(config: dict[str, Any], anomaly_type: str | None 
         # fail on repo-local flags such as --localizer.
         "extra_cli_args": _normalize_cli_args(generation_cfg.get("extra_cli_args")),
     }
+
+
+def build_generation_selector_cli_args(
+    selector_backend: str,
+    selector_model_name: str | None,
+    selector_profile: dict[str, Any],
+) -> list[str]:
+    args = [
+        "--selector-backend",
+        str(selector_backend),
+        "--selector-model",
+        str(selector_model_name or selector_backend),
+    ]
+    if selector_backend != "mmseg_floor_selector":
+        return args
+
+    option_fields = {
+        "python": "--floor-python",
+        "worker": "--floor-worker",
+        "config": "--floor-config",
+        "checkpoint": "--floor-checkpoint",
+        "device": "--floor-device",
+        "road_class_id": "--floor-road-class-id",
+        "line_class_id": "--floor-line-class-id",
+        "road_coverage_min": "--floor-road-coverage-min",
+        "line_coverage_max": "--floor-line-coverage-max",
+    }
+    for field, option in option_fields.items():
+        value = _non_empty(selector_profile.get(field))
+        if value is not None:
+            if field in {"worker", "config", "checkpoint"}:
+                value = str(Path(str(value)).resolve())
+            args.extend([option, str(value)])
+    return args
 
 
 def build_generation_extra_cli_args(localizer_cfg: dict[str, Any]) -> list[str]:

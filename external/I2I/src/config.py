@@ -20,6 +20,8 @@ class PipelineConfig:
     image_root: str
     output_root: str
     vlm_model: str = "qwen3.6-27b"
+    selector_backend: str = "qwen_grid_selector"
+    selector_model: str = "qwen3.6-27b"
     image_model: str = "doubao-seedream-5-0-pro-260628"
     grid_layout: str = "4x4"
     edit_bbox_expand_ratio: float = 0.20
@@ -34,6 +36,15 @@ class PipelineConfig:
     water_reference_dir: str | None = None
     red_box_max_size: int = 200
     red_box_min_size: int = 200
+    floor_python: str | None = None
+    floor_worker: str | None = None
+    floor_config: str | None = None
+    floor_checkpoint: str | None = None
+    floor_device: str = "cuda:0"
+    floor_road_class_id: int = 2
+    floor_line_class_id: int = 1
+    floor_road_coverage_min: float = 0.95
+    floor_line_coverage_max: float = 0.05
 
 
 @dataclass(frozen=True)

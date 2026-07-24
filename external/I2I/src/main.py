@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import random
+import sys
 import time
 
 import cv2
@@ -16,6 +17,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from config import I2IServiceConfig, PipelineConfig
 from cropper import crop_anomaly
 from diff_localizer import localize_change_bbox
+from floor_selector_client import run_mmseg_floor_prepass
 from grid import bbox_to_box_dict, expand_bbox, grid_id_to_bbox, make_grid_preview
 from metadata_builder import build_autolabel_sample, build_classification_labels
 from prompts import NEGATIVE_PROMPT, build_wan_prompt, write_prompt_files
@@ -43,6 +45,12 @@ def parse_args() -> PipelineConfig:
     parser.add_argument("--image-root", required=True)
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--vlm-model", default="qwen3.6-27b")
+    parser.add_argument(
+        "--selector-backend",
+        choices=["qwen_grid_selector", "mmseg_floor_selector"],
+        default="qwen_grid_selector",
+    )
+    parser.add_argument("--selector-model", default="qwen3.6-27b")
     parser.add_argument("--image-model", default="doubao-seedream-5-0-pro-260628")
     parser.add_argument("--grid-layout", default="4x4", choices=["4x4"])
     parser.add_argument("--edit-bbox-expand-ratio", type=float, default=0.20)
@@ -57,6 +65,19 @@ def parse_args() -> PipelineConfig:
     parser.add_argument("--water-reference-dir", default=None)
     parser.add_argument("--red-box-max-size", type=int, default=200)
     parser.add_argument("--red-box-min-size", type=int, default=200)
+    floor_root = Path(__file__).resolve().parents[2] / "floor_segmentation"
+    parser.add_argument("--floor-python", default=None)
+    parser.add_argument("--floor-worker", default=str(floor_root / "worker.py"))
+    parser.add_argument(
+        "--floor-config",
+        default=str(floor_root / "configs" / "segformer_mit-b0_roadline_inference.py"),
+    )
+    parser.add_argument("--floor-checkpoint", default=None)
+    parser.add_argument("--floor-device", default="cuda:0")
+    parser.add_argument("--floor-road-class-id", type=int, default=2)
+    parser.add_argument("--floor-line-class-id", type=int, default=1)
+    parser.add_argument("--floor-road-coverage-min", type=float, default=0.95)
+    parser.add_argument("--floor-line-coverage-max", type=float, default=0.05)
     args = parser.parse_args()
     return PipelineConfig(**vars(args))
 
@@ -967,7 +988,28 @@ def _validate_seedream_experiment_output(
     return result
 
 
-def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: QwenVLMClient, wan: WanImageClient) -> bool | None:
+def _water_mask_floor_overlap(mask_path: Path, floor_mask_path: Path) -> float:
+    with Image.open(mask_path) as mask_image:
+        water_mask = np.asarray(mask_image.convert("L")) > 0
+    with Image.open(floor_mask_path) as floor_image:
+        floor = floor_image.convert("L")
+        if floor.size != (water_mask.shape[1], water_mask.shape[0]):
+            floor = floor.resize((water_mask.shape[1], water_mask.shape[0]), Image.Resampling.NEAREST)
+        floor_mask = np.asarray(floor) > 0
+    water_area = int(water_mask.sum())
+    if water_area <= 0:
+        return 0.0
+    return float(np.logical_and(water_mask, floor_mask).sum() / water_area)
+
+
+def process_task(
+    task: dict,
+    cfg: PipelineConfig,
+    dirs: dict[str, Path],
+    vlm: QwenVLMClient | None,
+    wan: WanImageClient,
+    selector_result: dict | None = None,
+) -> bool | None:
     sample_id = task["sample_id"]
     stale_metadata = dirs["metadata"] / f"{sample_id}.json"
     failure_log = dirs["logs"] / f"{sample_id}_failure.json"
@@ -979,30 +1021,54 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
     original_path = resolve_image_path(task, cfg.image_root)
     width, height = image_size(original_path)
 
-    grid_preview_path = dirs["grid_previews"] / f"{sample_id}_grid.jpg"
-    make_grid_preview(str(original_path), str(grid_preview_path))
-
+    use_floor_selector = (
+        cfg.selector_backend == "mmseg_floor_selector"
+        and task["anomaly_type"] == "water_leak"
+        and cfg.seedream_mode in {"boxed_single_edit", "boxed_fusion"}
+    )
     vlm_result = None
     last_error: Exception | None = None
-    for attempt in range(cfg.max_retries + 1):
-        try:
-            vlm_result = vlm.select_grid_with_qwen(
-                str(grid_preview_path),
-                task["anomaly_type"],
-                str(dirs["logs"] / f"{sample_id}_vlm_response.json"),
+    if use_floor_selector:
+        if selector_result is None:
+            _write_failure(dirs["logs"], sample_id, "floor_segmentation", "floor selection result missing")
+            return False
+        if selector_result.get("status") == "skipped":
+            _write_skip(dirs["logs"], sample_id, "no_visible_floor_region", selector_result)
+            return None
+        if selector_result.get("status") != "selected":
+            _write_failure(
+                dirs["logs"],
+                sample_id,
+                "floor_segmentation",
+                selector_result.get("error") or selector_result.get("reason") or "unknown floor selector failure",
+                selector_result,
             )
-            if vlm_result["confidence"] < cfg.vlm_min_confidence:
-                raise ValueError(f"VLM confidence below threshold: {vlm_result['confidence']}")
-            break
-        except Exception as exc:
-            last_error = exc
-            logger.warning("%s VLM attempt %s failed: %s", sample_id, attempt + 1, exc)
-            if attempt < cfg.max_retries:
-                sleep_seconds = min(60.0, 5.0 * (2**attempt)) + random.uniform(0.0, 3.0)
-                time.sleep(sleep_seconds)
-    if vlm_result is None:
-        _write_failure(dirs["logs"], sample_id, "vlm", last_error or "unknown VLM failure")
-        return False
+            return False
+    else:
+        if vlm is None:
+            _write_failure(dirs["logs"], sample_id, "vlm", "Qwen selector client missing")
+            return False
+        grid_preview_path = dirs["grid_previews"] / f"{sample_id}_grid.jpg"
+        make_grid_preview(str(original_path), str(grid_preview_path))
+        for attempt in range(cfg.max_retries + 1):
+            try:
+                vlm_result = vlm.select_grid_with_qwen(
+                    str(grid_preview_path),
+                    task["anomaly_type"],
+                    str(dirs["logs"] / f"{sample_id}_vlm_response.json"),
+                )
+                if vlm_result["confidence"] < cfg.vlm_min_confidence:
+                    raise ValueError(f"VLM confidence below threshold: {vlm_result['confidence']}")
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning("%s VLM attempt %s failed: %s", sample_id, attempt + 1, exc)
+                if attempt < cfg.max_retries:
+                    sleep_seconds = min(60.0, 5.0 * (2**attempt)) + random.uniform(0.0, 3.0)
+                    time.sleep(sleep_seconds)
+        if vlm_result is None:
+            _write_failure(dirs["logs"], sample_id, "vlm", last_error or "unknown VLM failure")
+            return False
 
     prompt = build_wan_prompt(task["anomaly_type"])
     generated_path = dirs["generated_images"] / f"{sample_id}.png"
@@ -1014,14 +1080,17 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
     response_log_path = dirs["responses"] / f"{sample_id}_wan_response.json"
     seedream_quality = None
 
-    candidate_grids = _candidate_grids(vlm_result)
-    grid_id = str(vlm_result["selected_grid"]).strip().upper()
+    candidate_grids = [] if use_floor_selector else _candidate_grids(vlm_result)
+    grid_id = "FLOOR" if use_floor_selector else str(vlm_result["selected_grid"]).strip().upper()
     try:
         seedream_reference_paths: list[str] = []
         seedream_metadata: dict = {}
         red_box_bbox: tuple[int, int, int, int] | None = None
         floor_rejections: list[dict[str, str]] = []
-        if cfg.seedream_mode in {"boxed_single_edit", "boxed_fusion"} and task["anomaly_type"] == "water_leak":
+        if use_floor_selector:
+            red_box_bbox = tuple(int(value) for value in selector_result["bbox"])
+            grid_bbox = red_box_bbox
+        elif cfg.seedream_mode in {"boxed_single_edit", "boxed_fusion"} and task["anomaly_type"] == "water_leak":
             for candidate_grid in candidate_grids:
                 candidate_grid = str(candidate_grid).strip().upper()
                 try:
@@ -1162,6 +1231,16 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
                 "status": "ok",
                 "diff_method": "seedream_water_mask_within_selected_region",
             }
+            if use_floor_selector:
+                floor_mask_path = Path(str(selector_result["floor_mask_path"]))
+                floor_overlap = _water_mask_floor_overlap(mask_path, floor_mask_path)
+                seedream_metadata["water_bbox_floor_overlap"] = floor_overlap
+                min_floor_overlap = float(os.getenv("SEEDREAM_MIN_WATER_FLOOR_OVERLAP", "0.80"))
+                if floor_overlap < min_floor_overlap:
+                    raise RuntimeError(
+                        "Seedream water localization failed: water_mask_outside_segmented_floor "
+                        f"(water_bbox_floor_overlap={floor_overlap}, minimum={min_floor_overlap})"
+                    )
         else:
             diff = localize_change_bbox(
                 str(original_path),
@@ -1193,11 +1272,17 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
             cfg.crop_expand_ratio,
         )
         generation_params = {
-            "localization_pipeline": "vlm_grid_selection_then_image_edit_then_image_diff",
-            "vlm_model": cfg.vlm_model,
+            "localization_pipeline": (
+                "mmseg_floor_selection_then_image_edit_then_raw_diff"
+                if use_floor_selector
+                else "vlm_grid_selection_then_image_edit_then_image_diff"
+            ),
+            "selection_backend": cfg.selector_backend,
+            "selection_model": cfg.selector_model,
+            "vlm_model": cfg.vlm_model if not use_floor_selector else None,
             "image_generation_model": cfg.image_model,
-            "grid_layout": cfg.grid_layout,
-            "selected_grid": grid_id,
+            "grid_layout": cfg.grid_layout if not use_floor_selector else None,
+            "selected_grid": grid_id if not use_floor_selector else None,
             "candidate_grids": candidate_grids,
             "grid_bbox": list(grid_bbox),
             "expanded_edit_bbox": list(expanded_bbox),
@@ -1209,6 +1294,21 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
             "vlm_selection": vlm_result,
             **seedream_metadata,
         }
+        if use_floor_selector:
+            generation_params.update(
+                {
+                    "segmentation_model": selector_result.get("segmentation_model"),
+                    "checkpoint_digest": selector_result.get("checkpoint_digest"),
+                    "floor_class_id": selector_result.get("floor_class_id"),
+                    "floor_area_ratio": selector_result.get("floor_area_ratio"),
+                    "road_coverage_ratio": selector_result.get("road_coverage_ratio"),
+                    "line_coverage_ratio": selector_result.get("line_coverage_ratio"),
+                    "floor_mask_uri": relative_uri(Path(str(selector_result["floor_mask_path"]))),
+                    "floor_overlay_uri": relative_uri(Path(str(selector_result["floor_overlay_path"]))),
+                    "selected_floor_bbox": list(red_box_bbox),
+                    "water_bbox_floor_overlap": seedream_metadata.get("water_bbox_floor_overlap"),
+                }
+            )
         if seedream_quality is not None:
             generation_params["seedream_quality_gate"] = seedream_quality
         sample = build_autolabel_sample(
@@ -1223,12 +1323,14 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
             generation_prompt=prompt,
             image_model=cfg.image_model,
             vlm_model=cfg.vlm_model,
+            selector_model=cfg.selector_model,
+            selector_backend=cfg.selector_backend,
         )
         validate_required_fields(sample)
         write_json(dirs["metadata"] / f"{sample_id}.json", sample)
         if failure_log.exists():
             failure_log.unlink()
-        logger.info("%s succeeded with grid=%s final_bbox=%s", sample_id, grid_id, diff["bbox"])
+        logger.info("%s succeeded with selector=%s final_bbox=%s", sample_id, cfg.selector_backend, diff["bbox"])
         return True
     except Exception as exc:
         last_error = exc
@@ -1236,6 +1338,7 @@ def process_task(task: dict, cfg: PipelineConfig, dirs: dict[str, Path], vlm: Qw
 
     failure_context = {
         "vlm_result": vlm_result,
+        "floor_selection": selector_result if use_floor_selector else None,
         "candidate_grids": candidate_grids,
         "selected_grid": grid_id,
         **_failure_artifact_context(
@@ -1288,6 +1391,85 @@ def main() -> int:
     else:
         runnable_tasks = tasks
 
+    floor_tasks = [
+        task
+        for task in runnable_tasks
+        if cfg.selector_backend == "mmseg_floor_selector"
+        and task.get("anomaly_type") == "water_leak"
+        and cfg.seedream_mode in {"boxed_single_edit", "boxed_fusion"}
+    ]
+    floor_selections: dict[str, dict] = {}
+    if floor_tasks:
+        floor_python = cfg.floor_python or (sys.executable if cfg.dry_run else None)
+        if not floor_python:
+            error = "MMSeg floor selector Python is required; set --floor-python"
+            for task in floor_tasks:
+                _write_failure(dirs["logs"], task.get("sample_id", "unknown"), "floor_segmentation", error)
+            summary = {
+                "total": len(tasks),
+                "processed": len(runnable_tasks),
+                "succeeded": 0,
+                "failed": len(floor_tasks),
+                "skipped": skipped,
+                "skipped_existing": skipped,
+                "skipped_no_floor_region": 0,
+                "selector_inference_count": 0,
+                "selector_selected_count": 0,
+                "model_call_count": 0,
+                "seedream_call_count": 0,
+                "model_generated_count": 0,
+                "final_generated_count": _count_files(dirs["generated_images"]),
+                "debug_artifact_count": _count_files(dirs["debug"]),
+            }
+            write_json(dirs["logs"] / "run_summary.json", summary)
+            logger.error(error)
+            return 1
+        try:
+            floor_selections = run_mmseg_floor_prepass(
+                floor_tasks,
+                cfg.image_root,
+                dirs,
+                python_executable=floor_python,
+                worker_path=str(cfg.floor_worker),
+                config_path=str(cfg.floor_config),
+                checkpoint_path=str(cfg.floor_checkpoint or ""),
+                device=cfg.floor_device,
+                model_name=cfg.selector_model,
+                road_class_id=cfg.floor_road_class_id,
+                line_class_id=cfg.floor_line_class_id,
+                box_size=cfg.red_box_max_size,
+                road_coverage_min=cfg.floor_road_coverage_min,
+                line_coverage_max=cfg.floor_line_coverage_max,
+                dry_run=cfg.dry_run,
+            )
+        except Exception as exc:
+            for task in floor_tasks:
+                _write_failure(
+                    dirs["logs"],
+                    task.get("sample_id", "unknown"),
+                    "floor_segmentation",
+                    exc,
+                )
+            summary = {
+                "total": len(tasks),
+                "processed": len(runnable_tasks),
+                "succeeded": 0,
+                "failed": len(floor_tasks),
+                "skipped": skipped,
+                "skipped_existing": skipped,
+                "skipped_no_floor_region": 0,
+                "selector_inference_count": 0,
+                "selector_selected_count": 0,
+                "model_call_count": 0,
+                "seedream_call_count": 0,
+                "model_generated_count": 0,
+                "final_generated_count": _count_files(dirs["generated_images"]),
+                "debug_artifact_count": _count_files(dirs["debug"]),
+            }
+            write_json(dirs["logs"] / "run_summary.json", summary)
+            logger.error("MMSeg floor prepass failed: %s", exc)
+            return 1
+
     ok = 0
     failed = 0
     floor_skipped = 0
@@ -1295,10 +1477,18 @@ def main() -> int:
     logger.info("processing %s tasks with workers=%s skipped_existing=%s", len(runnable_tasks), workers, skipped)
 
     def run_one(task: dict) -> tuple[str, bool | None, int, int]:
-        vlm = QwenVLMClient(cfg.vlm_model, services.vlm, dry_run=cfg.dry_run)
+        use_floor_selector = task.get("sample_id") in floor_selections
+        vlm = None if use_floor_selector else QwenVLMClient(cfg.vlm_model, services.vlm, dry_run=cfg.dry_run)
         wan = WanImageClient(cfg.image_model, services.image, dry_run=cfg.dry_run)
         try:
-            success = process_task(task, cfg, dirs, vlm, wan)
+            success = process_task(
+                task,
+                cfg,
+                dirs,
+                vlm,
+                wan,
+                selector_result=floor_selections.get(str(task.get("sample_id"))),
+            )
             return (
                 task.get("sample_id", "unknown"),
                 success,
@@ -1362,7 +1552,14 @@ def main() -> int:
         "skipped": skipped + floor_skipped,
         "skipped_existing": skipped,
         "skipped_no_floor_region": floor_skipped,
+        "selector_inference_count": len(floor_tasks) if floor_tasks else len(runnable_tasks),
+        "selector_selected_count": (
+            sum(1 for result in floor_selections.values() if result.get("status") == "selected")
+            if floor_tasks
+            else ok + floor_skipped
+        ),
         "model_call_count": model_call_count,
+        "seedream_call_count": model_call_count,
         "model_generated_count": model_generated_count,
         "final_generated_count": final_generated_count,
         "debug_artifact_count": debug_artifact_count,

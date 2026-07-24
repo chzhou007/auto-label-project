@@ -1741,7 +1741,11 @@ class ContractTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0)
             self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0]["extra_cli_args"], [])
+            extra_args = calls[0]["extra_cli_args"]
+            self.assertIn("--selector-backend", extra_args)
+            self.assertIn("mmseg_floor_selector", extra_args)
+            self.assertNotIn("--localizer", extra_args)
+            self.assertNotIn("--localizer-fallback", extra_args)
 
     def test_generation_module_passes_seedream_model_to_i2i(self) -> None:
         from autolabel.modules.generation.i2i_external import ExternalI2IGenerationModule

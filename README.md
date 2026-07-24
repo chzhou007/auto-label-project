@@ -1121,6 +1121,9 @@ $env:ARK_API_KEY="..."
 $env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
 $env:SEEDREAM_IMAGE_MODEL="doubao-seedream-5-0-pro-260628"
 $env:WATER_LEAK_REFERENCE_DIR="D:\datasets\water_leak_refs"
+$env:MMSEG_FLOOR_PYTHON="D:\envs\openmmlab310\python.exe"
+$env:MMSEG_FLOOR_CHECKPOINT="D:\models\best_mIoU_iter_3000.pth"
+$env:MMSEG_FLOOR_DEVICE="cuda:0"
 
 python scripts/prepare_water_leak_manifest.py `
   --input data/staging/image_sequence/manifest.csv `
@@ -1132,7 +1135,7 @@ python scripts/run_pipeline.py `
   --branches generation,export `
   --manifest data/staging/image_sequence/water_leak_generation_1000.csv `
   --processed-root data/runs/water_leak_seedream5_calibration `
-  --generation-vlm-model-key qwen_grid_selector `
+  --generation-selector-key mmseg_floor_selector `
   --generation-image-model-key seedream5_image_editor `
   --generation-seedream-mode boxed_fusion `
   --generation-water-reference-dir $env:WATER_LEAK_REFERENCE_DIR `
@@ -1147,7 +1150,7 @@ python scripts/run_pipeline.py `
   --branches generation,export `
   --manifest data/staging/image_sequence/water_leak_generation_1000.csv `
   --processed-root data/runs/water_leak_seedream5_1000 `
-  --generation-vlm-model-key qwen_grid_selector `
+  --generation-selector-key mmseg_floor_selector `
   --generation-image-model-key seedream5_image_editor `
   --generation-seedream-mode boxed_fusion `
   --generation-water-reference-dir $env:WATER_LEAK_REFERENCE_DIR `
@@ -1158,7 +1161,11 @@ python scripts/run_pipeline.py `
   --skip-existing-generation
 ```
 
-`boxed_fusion` is the recommended Seedream experiment for water leak generation. It sends two inputs to Seedream using the Ark `image` array field: the source image with a deterministic 200x200 red guide box inside the selected grid, plus one water-stain reference image from `--generation-water-reference-dir`. The prompt is intentionally short: ask Seedream to fuse the two images and generate a natural water leak stain on the equipment-room floor. Generated samples are rejected if too much content outside the guide box changes.
+`boxed_fusion` is the recommended Seedream experiment for water leak generation. Before any Seedream call, the dedicated MMSeg Python environment loads the SegFormer checkpoint once and segments every runnable image. Only class `road=2` is eligible for the deterministic 200x200 guide box; `line=1` and `background=0` are excluded. Images without a qualifying floor region are recorded as `no_visible_floor_region` and do not consume a Seedream request.
+
+The MMSeg runtime is intentionally separate from the main Python 3.12 pipeline. `MMSEG_FLOOR_PYTHON` must point to a Python 3.10 environment with the versions used to train the model (Torch 2.1, MMCV 2.1, MMEngine 0.10, MMSegmentation 1.2). `MMSEG_FLOOR_CHECKPOINT` must point to the trained three-class SegFormer checkpoint; do not use a generic Cityscapes PSPNet checkpoint.
+
+Floor debug artifacts are written under `i2i_outputs/debug/floor_masks` and `i2i_outputs/debug/floor_overlays`. The final bbox and crop still come from the Seedream raw-vs-original water mask, not from the 200x200 guide box. The water mask must overlap the segmented floor or the sample is rejected.
 
 For a single-image coordinate edit comparison, use:
 
@@ -1170,7 +1177,7 @@ python scripts/run_pipeline.py `
   --branches generation,export `
   --manifest data/staging/image_sequence/water_leak_generation_1000.csv `
   --processed-root data/runs/water_leak_seedream5_boxed_single_calibration `
-  --generation-vlm-model-key qwen_grid_selector `
+  --generation-selector-key mmseg_floor_selector `
   --generation-image-model-key seedream5_image_editor `
   --generation-seedream-mode boxed_single_edit `
   --generation-red-box-max-size 200 `
@@ -1186,24 +1193,23 @@ The default config now routes image generation through `seedream5_image_editor`.
 
 Because Seedream image generation is not a proven local edit/inpaint endpoint, the pipeline rejects it unless you explicitly choose `--generation-seedream-mode single_image_edit`, `--generation-seedream-mode boxed_single_edit`, or `--generation-seedream-mode boxed_fusion`. Without that explicit experiment mode, Seedream reference generation is not allowed for production local editing.
 
-Generation model switching has two separate stages. Both are explicit on purpose:
+Generation selection and image generation are separate stages:
 
-- `--generation-vlm-model-key` selects the grid/region VLM profile.
+- `--generation-selector-key mmseg_floor_selector` selects the local floor segmentation prepass for water leaks.
 - `--generation-image-model-key` selects the image editing profile.
 
-If you only pass `--generation-image-model-key seedream5_image_editor`, only the I2I image editing model changes; the grid selector remains the configured `generation.vlm_model_key`. To select a private VLM profile from this repository, set `CUSTOM_VLM_MODEL`, `PRIVATE_MODEL_API_KEY`, and `CUSTOM_VLM_ENDPOINT`, then run with `--generation-vlm-model-key custom_grid_selector`.
+The default water-leak selector is `mmseg_floor_selector`, so Qwen credentials are not required for this generation path. The legacy `--generation-vlm-model-key` remains available when explicitly switching back to `qwen_grid_selector` for another anomaly type, but it is not a floor-selection fallback.
 
 Important external I2I compatibility note:
 
-- This repository now resolves and passes both selected model names into the external I2I process as `--vlm-model` and `--image-model`.
-- It also passes each selected model profile's env values into the subprocess.
-- Use the synced provider-aware external I2I version. Its VLM stage reads `QWEN397B_API_KEY` / `QWEN397B_API_URL`, and its image stage reads `ARK_API_KEY` / `SEEDREAM_BASE_URL`.
+- This repository passes the selector backend, selector model, MMSeg runtime paths, and image model into the bundled external I2I process.
+- Water-leak MMSeg selection reads `MMSEG_FLOOR_PYTHON`, `MMSEG_FLOOR_CHECKPOINT`, and `MMSEG_FLOOR_DEVICE`; Seedream reads `ARK_API_KEY` and `SEEDREAM_BASE_URL`.
 - If you point `I2I_PROJECT_DIR` at an older external I2I checkout, the repo CLI may show the intended model chain in preflight while the old I2I client still calls DashScope endpoints.
 
 For current production runs, read the preflight line before spending API quota. It prints the effective model chain as:
 
 ```text
-models=water_leak:<vlm_model_name>-><image_model_name>
+models=water_leak:<selector_model_name>-><image_model_name>
 ```
 
 ### 17.6 Recommended Config

@@ -49,6 +49,8 @@ def build_autolabel_sample(
     generation_prompt: str,
     image_model: str,
     vlm_model: str,
+    selector_model: str | None = None,
+    selector_backend: str = "qwen_grid_selector",
 ) -> dict:
     now = now_iso_shanghai()
     anomaly_type = task["anomaly_type"]
@@ -84,7 +86,10 @@ def build_autolabel_sample(
                 "box": object_box,
                 "geometry_source": "synthetic_generator",
                 "geometry_model": {
-                    "model_name": f"{vlm_model}_grid_selection + {image_model} + image_diff_connected_components",
+                    "model_name": (
+                        f"{selector_model or vlm_model}_selection + "
+                        f"{image_model} + image_diff_connected_components"
+                    ),
                     "model_version": "v1.0",
                     "confidence": None,
                 },
@@ -109,7 +114,11 @@ def build_autolabel_sample(
         "qc_policy": None,
         "workflow": {
             "workflow_status": "classified",
-            "pipeline_id": "vlm_grid_image_edit_autolabel_pipeline",
+            "pipeline_id": (
+                "mmseg_floor_image_edit_autolabel_pipeline"
+                if selector_backend == "mmseg_floor_selector"
+                else "vlm_grid_image_edit_autolabel_pipeline"
+            ),
             "pipeline_version": "v1.0",
             "created_time": now,
             "updated_time": now,
