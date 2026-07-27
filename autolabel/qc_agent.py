@@ -5,7 +5,7 @@ import io
 import hashlib
 from collections import Counter
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from .adapters.crop_reviewer import parse_review_payload
@@ -157,7 +157,24 @@ def resolve_local_uri(
     if value.is_absolute():
         return value, value.exists(), [str(value)]
 
-    candidates = [root / value for root in _candidate_roots(metadata_path, extra_roots)]
+    # Metadata is frequently produced on Windows and reviewed on Linux/macOS.
+    # On POSIX, ``Path(r"C:\\...")`` treats the complete Windows path as one
+    # relative filename. Try progressively shorter Windows-path suffixes so an
+    # explicitly supplied asset root can resolve the copied output tree.
+    variants = [value]
+    windows_value = PureWindowsPath(uri)
+    if windows_value.drive or "\\" in uri:
+        windows_parts = list(windows_value.parts)
+        if windows_value.anchor and windows_parts and windows_parts[0] == windows_value.anchor:
+            windows_parts = windows_parts[1:]
+        variants.extend(Path(*windows_parts[index:]) for index in range(len(windows_parts)))
+    variants = _dedupe_paths(variants)
+
+    candidates = [
+        root / variant
+        for root in _candidate_roots(metadata_path, extra_roots)
+        for variant in variants
+    ]
     for candidate in candidates:
         if candidate.exists():
             return candidate, True, [str(path) for path in candidates]

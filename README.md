@@ -2,6 +2,18 @@
 
 本项目用于维护一条自动化标注 DAG，将未标注图片、视频、图像生成结果、检测/分割模型结果、大模型分类结果统一整理为 `AutoLabelSample` 数据结构，并支持导出到 Label Studio。
 
+## Web 质检交付入口
+
+面向非开发用户时，推荐使用 Gradio Web 端：上传包含 `metadata/` 和图片的 ZIP，网页展示中文分流结果和证据图，最后下载结果 ZIP。
+
+```bash
+python scripts/run_qc_web.py
+```
+
+Docker 部署、输入 ZIP 目录规范和输出字段见：
+
+[`docs/qc_web_deployment.md`](docs/qc_web_deployment.md)
+
 ## 1. DAG 流程
 
 ```text
