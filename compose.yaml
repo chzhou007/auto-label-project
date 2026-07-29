@@ -1,0 +1,25 @@
+name: autolabel-qc
+
+services:
+  qc-web:
+    build: .
+    ports:
+      - "${QC_PORT:-7860}:7860"
+    environment:
+      SJTU_API_BASE_URL: "${SJTU_API_BASE_URL:-}"
+      SJTU_API_KEY: "${SJTU_API_KEY:-}"
+      QC_PRIMARY_MODEL: "${QC_PRIMARY_MODEL:-qwen}"
+      QC_CLEAN_VERIFIER_MODEL: "${QC_CLEAN_VERIFIER_MODEL:-qwen3.6-27b}"
+      QC_WEB_USERNAME: "${QC_WEB_USERNAME:-}"
+      QC_WEB_PASSWORD: "${QC_WEB_PASSWORD:-}"
+      QC_REQUIRE_AUTH: "${QC_REQUIRE_AUTH:-true}"
+      QC_MAX_UPLOAD_MB: "${QC_MAX_UPLOAD_MB:-2048}"
+      QC_MAX_EXTRACTED_MB: "${QC_MAX_EXTRACTED_MB:-8192}"
+      QC_MAX_ARCHIVE_FILES: "${QC_MAX_ARCHIVE_FILES:-30000}"
+      QC_KEEP_INPUTS: "${QC_KEEP_INPUTS:-false}"
+    volumes:
+      - qc_runs:/data/runs
+    restart: unless-stopped
+
+volumes:
+  qc_runs:

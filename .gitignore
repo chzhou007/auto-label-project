@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 venv/
 configs/autolabel.local.yaml
+.env
 
 data/raw/images/*
 data/raw/videos/*
@@ -17,6 +18,7 @@ data/processed/i2i_outputs/*
 data/exports/*
 data/qc/*
 data/runs/*
+data/web_runs/*
 
 !data/raw/images/.gitkeep
 !data/raw/videos/.gitkeep
@@ -26,3 +28,4 @@ data/runs/*
 !data/processed/metadata/.gitkeep
 !data/exports/labelstudio/.gitkeep
 !data/qc/.gitkeep
+!data/web_runs/.gitkeep

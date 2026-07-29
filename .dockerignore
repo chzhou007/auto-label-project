@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+configs/autolabel.local.yaml
+data/raw
+data/staging
+data/processed
+data/exports
+data/qc
+data/runs
+data/web_runs
