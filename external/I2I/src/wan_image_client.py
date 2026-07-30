@@ -213,7 +213,12 @@ def _is_seedream_reference_generation_endpoint(endpoint: str) -> bool:
     return normalized.endswith("/images/generations") or "/images/generations" in normalized
 
 
-VALID_SEEDREAM_EXPERIMENT_MODES = {"single_image_edit", "boxed_single_edit", "boxed_fusion"}
+VALID_SEEDREAM_EXPERIMENT_MODES = {
+    "single_image_edit",
+    "boxed_single_edit",
+    "boxed_fusion",
+    "cabinet_door_open",
+}
 
 
 def _allow_seedream_reference_generation_debug() -> bool:
@@ -243,6 +248,18 @@ def _seedream_prompt(
     anomaly_type: str | None = None,
 ) -> str:
     x1, y1, x2, y2 = bbox
+    if seedream_mode == "cabinet_door_open":
+        return (
+            "Edit the input image itself. Open exactly one currently closed equipment-cabinet door whose closed "
+            f"door leaf is inside pixel bbox [{x1}, {y1}, {x2}, {y2}]. Open it naturally by about 45-70 degrees "
+            "around its existing hinge. Preserve the same cabinet identity, door material, color, thickness, "
+            "handle, hinge geometry, perspective, lighting, camera position, timestamp, resolution, and all "
+            "surrounding equipment. Reveal only a plausible dark cabinet interior directly behind this door. "
+            "The opened door may extend immediately to the left or right of the bbox according to its hinge, "
+            "but do not alter any other cabinet door or object. Return one full-frame edited CCTV image. "
+            "No second scene, no inset, no pasted rectangle, no border, no duplicated cabinet, no detached or "
+            "floating door, no people, and no new text."
+        )
     if seedream_mode == "boxed_single_edit":
         return (
             f"Use the input image as the only source scene. The red rectangle marks the allowed edit region "
@@ -320,7 +337,7 @@ def _seedream_payload_model(model: str, seedream_mode: str | None) -> str:
     override = os.getenv("SEEDREAM_IMAGE_MODEL", "").strip()
     if override:
         return override
-    if seedream_mode in {"single_image_edit", "boxed_single_edit"}:
+    if seedream_mode in {"single_image_edit", "boxed_single_edit", "cabinet_door_open"}:
         return os.getenv("SEEDREAM_SINGLE_IMAGE_MODEL", model).strip() or model
     return model
 

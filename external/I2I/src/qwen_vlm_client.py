@@ -163,6 +163,103 @@ def validate_vlm_selection(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def validate_cabinet_door_selection(
+    payload: dict[str, Any],
+    image_size: tuple[int, int],
+    *,
+    min_confidence: float = 0.70,
+) -> dict[str, Any]:
+    status = str(payload.get("status", "")).strip().lower()
+    reason = str(payload.get("reason", "")).strip()
+    try:
+        confidence = max(0.0, min(1.0, float(payload.get("confidence", 0.0))))
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    if status in {"skip", "skipped", "no_target", "none"}:
+        return {
+            "status": "skipped",
+            "confidence": confidence,
+            "reason": reason or "no suitable closed cabinet door",
+            "bbox": None,
+            "bbox_1000": None,
+        }
+    if status not in {"selected", "select", "ok"}:
+        raise ValueError(f"Qwen cabinet-door response has invalid status: {status!r}")
+    if confidence < min_confidence:
+        return {
+            "status": "skipped",
+            "confidence": confidence,
+            "reason": reason or f"selection confidence below {min_confidence:.2f}",
+            "bbox": None,
+            "bbox_1000": None,
+        }
+
+    raw_bbox = payload.get("bbox_1000") or payload.get("bbox")
+    if isinstance(raw_bbox, dict):
+        raw_bbox = [raw_bbox.get(key) for key in ("x1", "y1", "x2", "y2")]
+    if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+        raise ValueError("Qwen cabinet-door response has no valid bbox_1000")
+    try:
+        x1n, y1n, x2n, y2n = [float(value) for value in raw_bbox]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Qwen cabinet-door bbox_1000 must contain numbers") from exc
+    x1n, x2n = sorted((max(0.0, min(1000.0, x1n)), max(0.0, min(1000.0, x2n))))
+    y1n, y2n = sorted((max(0.0, min(1000.0, y1n)), max(0.0, min(1000.0, y2n))))
+    if x2n - x1n < 15 or y2n - y1n < 15:
+        raise ValueError(f"Qwen cabinet-door bbox_1000 is too small: {[x1n, y1n, x2n, y2n]}")
+
+    width, height = image_size
+    bbox = (
+        max(0, min(width - 1, round(x1n * width / 1000.0))),
+        max(0, min(height - 1, round(y1n * height / 1000.0))),
+        max(1, min(width, round(x2n * width / 1000.0))),
+        max(1, min(height, round(y2n * height / 1000.0))),
+    )
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        raise ValueError(f"Qwen cabinet-door bbox is empty after scaling: {bbox}")
+    area_ratio = ((bbox[2] - bbox[0]) * (bbox[3] - bbox[1])) / float(width * height)
+    short_side = min(bbox[2] - bbox[0], bbox[3] - bbox[1])
+    if area_ratio < 0.0008 or short_side < 35:
+        return {
+            "status": "skipped",
+            "confidence": confidence,
+            "reason": reason or "selected cabinet door is too small for reliable editing",
+            "bbox": None,
+            "bbox_1000": [x1n, y1n, x2n, y2n],
+        }
+    return {
+        "status": "selected",
+        "confidence": confidence,
+        "reason": reason,
+        "bbox": list(bbox),
+        "bbox_1000": [x1n, y1n, x2n, y2n],
+        "target_description": str(payload.get("target_description", "")).strip(),
+        "hinge_side": str(payload.get("hinge_side", "unknown")).strip().lower(),
+        "area_ratio": area_ratio,
+    }
+
+
+def build_cabinet_door_bbox_prompt() -> str:
+    return """You select exactly one currently CLOSED equipment-cabinet door leaf in an industrial CCTV image.
+
+Select a real equipment cabinet, electrical cabinet, control cabinet, server cabinet, battery cabinet, or machine enclosure door that is clearly visible and can plausibly swing open. Prefer one large, unobstructed, front-facing or mildly oblique door leaf.
+
+Do not select an already open door, exposed rack interior, room entrance door, fire door, wall, window, removable panel without a hinge, tiny junction box, person, reflection, or image overlay. If no suitable closed equipment-cabinet door is visible, return status "skip".
+
+Coordinates must use a normalized 0-1000 coordinate system relative to the full image. The bbox must tightly cover the visible closed door leaf, excluding surrounding cabinet body, handles protruding outside the leaf, labels, and aisle.
+
+Return JSON only:
+{
+  "status": "selected" or "skip",
+  "bbox_1000": [x1, y1, x2, y2] or null,
+  "confidence": 0.0,
+  "hinge_side": "left" or "right" or "unknown",
+  "target_description": "short target description",
+  "reason": "short reason"
+}"""
+
+
 class QwenVLMClient:
     def __init__(self, model: str, dashscope_config: ModelServiceConfig | DashScopeConfig, dry_run: bool = False):
         self.model = model
@@ -327,6 +424,94 @@ class QwenVLMClient:
 
         text = _extract_text_from_response(raw)
         parsed = validate_vlm_selection(_extract_json(text))
+        parsed["raw_response"] = raw
+        if log_path:
+            request_log["endpoint"] = used_endpoint
+            if failed_attempts:
+                request_log["failed_attempts"] = failed_attempts
+            write_json(log_path, {"request": request_log, "parsed": parsed, "response": raw})
+        return parsed
+
+    def select_cabinet_door_bbox(
+        self,
+        image_path: str,
+        image_size: tuple[int, int],
+        log_path: str | None = None,
+        *,
+        min_confidence: float = 0.70,
+    ) -> dict[str, Any]:
+        if self.dry_run:
+            width, height = image_size
+            bbox = [round(width * 0.35), round(height * 0.20), round(width * 0.60), round(height * 0.80)]
+            result = {
+                "status": "selected",
+                "confidence": 0.80,
+                "reason": "dry-run deterministic cabinet-door selection",
+                "bbox": bbox,
+                "bbox_1000": [350, 200, 600, 800],
+                "target_description": "dry-run closed equipment cabinet door",
+                "hinge_side": "left",
+                "area_ratio": ((bbox[2] - bbox[0]) * (bbox[3] - bbox[1])) / float(width * height),
+                "raw_response": {"dry_run": True},
+            }
+            if log_path:
+                write_json(log_path, result)
+            return result
+
+        if not self.config.api_key:
+            raise RuntimeError("VLM API key is required unless --dry-run is used; set QWEN397B_API_KEY")
+
+        prompt = build_cabinet_door_bbox_prompt()
+        endpoints, body, log_body = self._build_request_payloads(image_path, prompt)
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+        request_log: dict[str, Any] = {
+            "endpoint": endpoints[0],
+            "endpoint_attempts": endpoints,
+            "provider": self.config.provider,
+            "headers": redact_headers(headers),
+            "body": log_body,
+        }
+        raw: dict[str, Any] = {}
+        failed_attempts: list[dict[str, Any]] = []
+        used_endpoint = endpoints[0]
+        for index, endpoint in enumerate(endpoints):
+            used_endpoint = endpoint
+            response = requests.post(endpoint, headers=headers, json=body, timeout=120)
+            try:
+                raw = response.json()
+            except Exception:
+                raw = {"status_code": response.status_code, "text": response.text}
+            if response.ok:
+                break
+            failed_attempts.append(
+                {
+                    "endpoint": endpoint,
+                    "status_code": response.status_code,
+                    "response_summary": _response_error_summary(raw),
+                }
+            )
+            if response.status_code == 404 and index + 1 < len(endpoints):
+                continue
+            if log_path:
+                request_log["endpoint"] = used_endpoint
+                request_log["failed_attempts"] = failed_attempts
+                write_json(log_path, {"request": request_log, "response": raw})
+            raise RuntimeError(
+                "Qwen request failed: "
+                f"HTTP {response.status_code} endpoint={used_endpoint} response={_response_error_summary(raw)}"
+            )
+        else:
+            raise RuntimeError(f"Qwen request failed for all endpoints: {endpoints}")
+
+        parsed_payload = _extract_json(_extract_text_from_response(raw))
+        parsed = validate_cabinet_door_selection(
+            parsed_payload,
+            image_size,
+            min_confidence=min_confidence,
+        )
         parsed["raw_response"] = raw
         if log_path:
             request_log["endpoint"] = used_endpoint

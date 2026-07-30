@@ -1212,7 +1212,29 @@ For current production runs, read the preflight line before spending API quota. 
 models=water_leak:<selector_model_name>-><image_model_name>
 ```
 
-### 17.6 Recommended Config
+### 17.6 Cabinet Door Open Batch
+
+Cabinet-door generation uses a separate two-model path and does not enter the leak, grid, MMSeg, red-box, or water-mask pipeline:
+
+1. Qwen inspects a compressed full-scene preview and either returns one normalized bbox for a clearly visible, currently closed equipment-cabinet door or skips the image.
+2. Seedream Pro receives the original image once and opens that door. Each selected image has one logical Qwen call and one logical Seedream call; skipped images consume no Seedream call.
+
+```powershell
+$env:QWEN397B_API_KEY = "<qwen-api-key>"
+$env:ARK_API_KEY = "<ark-api-key>"
+
+python scripts/generate_cabinet_door_open.py `
+  --image-dir "D:\path\to\source_images" `
+  --output-root "D:\path\to\cabinet_door_open_output" `
+  --vlm-model qwen3.6-27b `
+  --image-model doubao-seedream-5-0-pro-260628 `
+  --limit 5 `
+  --workers 1
+```
+
+Remove `--limit 5` after reviewing the smoke-test images. Use `--skip-existing` to resume. Accepted images are written to `generated_images`; background-drift failures are retained under `debug/failed_generated_images`; exact Qwen/Seedream call counts are written to `logs/run_summary.json`.
+
+### 17.7 Recommended Config
 
 The current recommended config block is:
 
