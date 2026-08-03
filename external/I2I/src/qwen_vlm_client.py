@@ -5,6 +5,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 import requests
@@ -48,6 +49,31 @@ def _extract_text_from_response(response: dict[str, Any]) -> str:
             return content
 
     output = response.get("output", {})
+    if isinstance(output, list):
+        parts: list[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content", [])
+            if isinstance(content, str):
+                parts.append(content)
+                continue
+            if not isinstance(content, list):
+                continue
+            for content_item in content:
+                if isinstance(content_item, str):
+                    parts.append(content_item)
+                elif isinstance(content_item, dict):
+                    text = content_item.get("text") or content_item.get("output_text")
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+        if parts:
+            return "\n".join(parts)
+        output_text = response.get("output_text")
+        if isinstance(output_text, str) and output_text:
+            return output_text
+        raise ValueError("unable to extract VLM text from Ark Responses output")
+
     choices = output.get("choices")
     if isinstance(choices, list) and choices:
         message = choices[0].get("message", {})
@@ -81,6 +107,15 @@ def _is_openai_compatible(config: ModelServiceConfig | DashScopeConfig, endpoint
         return True
     normalized = endpoint.rstrip("/")
     return normalized.endswith("/v1") or normalized.endswith("/chat/completions")
+
+
+def _is_ark_responses(config: ModelServiceConfig | DashScopeConfig, endpoint: str) -> bool:
+    provider = str(getattr(config, "provider", "") or "").lower()
+    return provider in {
+        "volcengine_ark_responses",
+        "ark_responses",
+        "ark-responses",
+    } or endpoint.rstrip("/").endswith("/responses")
 
 
 def _candidate_request_endpoints(endpoint: str) -> list[str]:
@@ -123,6 +158,26 @@ def _vlm_image_max_bytes() -> int:
         raise ValueError("QWEN397B_IMAGE_MAX_BYTES must be a positive integer") from exc
     if value <= 0:
         raise ValueError("QWEN397B_IMAGE_MAX_BYTES must be a positive integer")
+    return value
+
+
+def _ark_responses_thinking_type() -> str | None:
+    value = os.getenv("ARK_VLM_THINKING", "disabled").strip().lower()
+    if value in {"", "auto", "default"}:
+        return None
+    if value not in {"disabled", "enabled"}:
+        raise ValueError("ARK_VLM_THINKING must be disabled, enabled, or auto")
+    return value
+
+
+def _ark_responses_max_output_tokens() -> int:
+    raw = os.getenv("ARK_VLM_MAX_OUTPUT_TOKENS", "512").strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("ARK_VLM_MAX_OUTPUT_TOKENS must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError("ARK_VLM_MAX_OUTPUT_TOKENS must be a positive integer")
     return value
 
 
@@ -261,10 +316,24 @@ Return JSON only:
 
 
 class QwenVLMClient:
-    def __init__(self, model: str, dashscope_config: ModelServiceConfig | DashScopeConfig, dry_run: bool = False):
+    def __init__(
+        self,
+        model: str,
+        dashscope_config: ModelServiceConfig | DashScopeConfig,
+        dry_run: bool = False,
+        *,
+        request_timeout_seconds: float = 300.0,
+        max_retries: int = 0,
+    ):
         self.model = model
         self.config = dashscope_config
         self.dry_run = dry_run
+        if request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+        self.request_timeout_seconds = float(request_timeout_seconds)
+        self.max_retries = int(max_retries)
 
     def _build_request_payloads(self, grid_image_path: str, prompt: str) -> tuple[list[str], dict[str, Any], dict[str, Any]]:
         endpoint = _service_endpoint(self.config)
@@ -277,6 +346,40 @@ class QwenVLMClient:
                 "or QWEN_GRID_PREVIEW_JPEG_QUALITY"
             )
         image_data_url = image_to_data_url(grid_image_path)
+        if _is_ark_responses(self.config, endpoint):
+            body = {
+                "model": self.model,
+                "store": False,
+                "max_output_tokens": _ark_responses_max_output_tokens(),
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_image", "image_url": image_data_url},
+                            {"type": "input_text", "text": prompt},
+                        ],
+                    }
+                ],
+            }
+            thinking_type = _ark_responses_thinking_type()
+            if thinking_type:
+                body["thinking"] = {"type": thinking_type}
+            log_body = {
+                **body,
+                "image_bytes": image_bytes,
+                "image_max_bytes": max_image_bytes,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_image", "image_url": grid_image_path},
+                            {"type": "input_text", "text": prompt},
+                        ],
+                    }
+                ],
+            }
+            return [endpoint.rstrip("/")], body, log_body
+
         if _is_openai_compatible(self.config, endpoint):
             request_endpoints = _candidate_request_endpoints(endpoint)
             body: dict[str, Any] = {
@@ -369,7 +472,8 @@ class QwenVLMClient:
             return result
 
         if not self.config.api_key:
-            raise RuntimeError("VLM API key is required unless --dry-run is used; set QWEN397B_API_KEY")
+            api_key_env = getattr(self.config, "api_key_env", None) or "QWEN397B_API_KEY"
+            raise RuntimeError(f"VLM API key is required unless --dry-run is used; set {api_key_env}")
 
         prompt = build_vlm_prompt(anomaly_type)
         endpoints, body, log_body = self._build_request_payloads(grid_image_path, prompt)
@@ -390,7 +494,12 @@ class QwenVLMClient:
         failed_attempts: list[dict[str, Any]] = []
         for index, endpoint in enumerate(endpoints):
             used_endpoint = endpoint
-            response = requests.post(endpoint, headers=headers, json=body, timeout=120)
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=body,
+                timeout=(15, self.request_timeout_seconds),
+            )
             status_code = response.status_code
             try:
                 raw = response.json()
@@ -459,7 +568,8 @@ class QwenVLMClient:
             return result
 
         if not self.config.api_key:
-            raise RuntimeError("VLM API key is required unless --dry-run is used; set QWEN397B_API_KEY")
+            api_key_env = getattr(self.config, "api_key_env", None) or "QWEN397B_API_KEY"
+            raise RuntimeError(f"VLM API key is required unless --dry-run is used; set {api_key_env}")
 
         prompt = build_cabinet_door_bbox_prompt()
         endpoints, body, log_body = self._build_request_payloads(image_path, prompt)
@@ -479,7 +589,48 @@ class QwenVLMClient:
         used_endpoint = endpoints[0]
         for index, endpoint in enumerate(endpoints):
             used_endpoint = endpoint
-            response = requests.post(endpoint, headers=headers, json=body, timeout=120)
+            response = None
+            for attempt in range(self.max_retries + 1):
+                try:
+                    response = requests.post(
+                        endpoint,
+                        headers=headers,
+                        json=body,
+                        timeout=(15, self.request_timeout_seconds),
+                    )
+                    break
+                except requests.RequestException as exc:
+                    failed_attempts.append(
+                        {
+                            "endpoint": endpoint,
+                            "attempt": attempt + 1,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                            "timeout_seconds": self.request_timeout_seconds,
+                        }
+                    )
+                    if log_path:
+                        request_log["endpoint"] = used_endpoint
+                        request_log["failed_attempts"] = failed_attempts
+                        write_json(
+                            log_path,
+                            {
+                                "request": request_log,
+                                "error": {
+                                    "type": type(exc).__name__,
+                                    "message": str(exc),
+                                },
+                            },
+                        )
+                    if attempt >= self.max_retries:
+                        raise RuntimeError(
+                            "VLM selector request failed before receiving a response: "
+                            f"{type(exc).__name__}: {exc}. "
+                            f"Configured read timeout={self.request_timeout_seconds:g}s."
+                        ) from exc
+                    time.sleep(min(2**attempt, 8))
+            if response is None:
+                raise RuntimeError("VLM selector request produced no response")
             try:
                 raw = response.json()
             except Exception:

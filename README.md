@@ -1214,25 +1214,67 @@ models=water_leak:<selector_model_name>-><image_model_name>
 
 ### 17.6 Cabinet Door Open Batch
 
-Cabinet-door generation uses a separate two-model path and does not enter the leak, grid, MMSeg, red-box, or water-mask pipeline:
+Cabinet-door generation uses the existing door-segmentation/classification results and does not enter the leak, grid, floor-MMSeg, red-box, or water-mask pipeline:
 
-1. Qwen inspects a compressed full-scene preview and either returns one normalized bbox for a clearly visible, currently closed equipment-cabinet door or skips the image.
-2. Seedream Pro receives the original image once and opens that door. Each selected image has one logical Qwen call and one logical Seedream call; skipped images consume no Seedream call.
+1. `candidate_predictions.csv` supplies segmented door polygons plus closed/open and not-door classifier probabilities. The selector derives a tight bbox from `polygon_json`; the CSV crop bbox is intentionally not used when a valid polygon exists. `image_predictions.csv` supplies the room type.
+2. The default selector keeps one compact, low-texture, high-confidence closed door in an electrical room. The default room allowlist is `高压配电室|低压配电室|发电机配电房`, which excludes module rooms, carrier access rooms, weak-current rooms, and server-rack-heavy scenes. Merged cabinet-bank masks above 10% of the image and high-texture rack/shelf candidates are rejected.
+3. The selected door bbox is expanded into a context crop with space on both sides for the door swing. Seedream Pro receives this crop once, with the door bbox converted into crop-local coordinates. It never regenerates the full source image and nothing is pasted back into the source.
+4. Accepted results are written as size-aligned classification pairs. `close` is the untouched context crop and `open` is the quality-passed Seedream crop. Metadata preserves the original-image door bbox, the context-crop bbox in original coordinates, and the door bbox in crop-local coordinates.
+5. The default path makes zero Qwen/VLM calls and one Seedream call per selected image.
 
 ```powershell
-$env:QWEN397B_API_KEY = "<qwen-api-key>"
 $env:ARK_API_KEY = "<ark-api-key>"
 
 python scripts/generate_cabinet_door_open.py `
-  --image-dir "D:\path\to\source_images" `
-  --output-root "D:\path\to\cabinet_door_open_output" `
-  --vlm-model qwen3.6-27b `
+  --image-dir "D:\codex\datacenter-door-seg\runs\inference\0730_cascade_v5_mask_dedup_LF20A1_full_20260727\false_positive_originals_dedup_190" `
+  --output-root "D:\codex\datacenter-door-seg\runs\generation\0730_seg_seedream_electrical_cabinet_open" `
+  --selector-backend segmentation_candidates `
+  --candidate-predictions-csv "D:\codex\datacenter-door-seg\runs\inference\0730_cascade_v5_mask_dedup_LF20A1_full_20260727\candidate_predictions.csv" `
+  --image-predictions-csv "D:\codex\datacenter-door-seg\runs\inference\0730_cascade_v5_mask_dedup_LF20A1_full_20260727\image_predictions.csv" `
   --image-model doubao-seedream-5-0-pro-260628 `
   --limit 5 `
-  --workers 1
+  --workers 1 `
+  --skip-existing
 ```
 
-Remove `--limit 5` after reviewing the smoke-test images. Use `--skip-existing` to resume. Accepted images are written to `generated_images`; background-drift failures are retained under `debug/failed_generated_images`; exact Qwen/Seedream call counts are written to `logs/run_summary.json`.
+For the segmentation backend, `--limit 5` means five eligible segmented closed doors, not the first five source files. Remove the limit after reviewing the smoke test. The complete selector audit is written to `logs/segmentation_selections.jsonl`.
+
+The paired dataset layout is:
+
+```text
+pairs/
+  close/                 # untouched closed-door context crops
+  open/                  # size-aligned Seedream open-door context crops
+  annotations/           # source bbox, context bbox, crop-local bbox, classifier scores
+  manifest.csv           # one row per close/open pair
+```
+
+`debug/selection_overlays` shows the segmentation bbox on the source image. `debug/seedream_input_crops` contains the exact close crop sent to Seedream, and `debug/seedream_raw_outputs` keeps the model response before size normalization. Background-drift failures are retained under `debug/failed_generated_images`; exact selector and Seedream call counts are written to `logs/run_summary.json`. `generated_images` is not used by this classification-pair workflow.
+
+The legacy visual selector remains available only for compatibility with `--selector-backend vlm`. It is not a fallback for the segmentation path. Seedream uses the OpenAI Python SDK when installed and otherwise sends the same payload directly to Ark `/api/v3/images/generations` through `requests`.
+
+To prioritize a manually reviewed directory, pass it as a filename list instead of using its annotated images as model inputs. The command below processes only clean source images whose names occur under `按结果复核\有开门`:
+
+```powershell
+$env:ARK_API_KEY = "<ark-api-key>"
+
+python scripts/generate_cabinet_door_open.py `
+  --image-dir "C:\Users\chang\Downloads\LF20A1_设备柜门箱门异常识别_全量_20260727_163917\LF20A1_设备柜门箱门异常识别_全量_20260727_163917\images" `
+  --output-root "D:\codex\datacenter-door-seg\runs\generation\0729_reviewed_equipment_cabinet_open_crop" `
+  --priority-image-dir "D:\codex\datacenter-door-seg\runs\inference\0729_cascade_v3_lf20a1_fp_LF20A1_full_20260727\按结果复核\有开门" `
+  --priority-only `
+  --reviewed-all-close `
+  --selector-backend segmentation_candidates `
+  --candidate-predictions-csv "D:\codex\datacenter-door-seg\runs\inference\0729_cascade_v3_lf20a1_fp_LF20A1_full_20260727\candidate_predictions.csv" `
+  --image-predictions-csv "D:\codex\datacenter-door-seg\runs\inference\0729_cascade_v3_lf20a1_fp_LF20A1_full_20260727\image_predictions.csv" `
+  --image-model doubao-seedream-5-0-pro-260628 `
+  --workers 1 `
+  --skip-existing
+```
+
+Replace `<ark-api-key>` with the actual ASCII Ark key. The batch preflight rejects copied placeholders or non-ASCII values before any image request is attempted.
+
+`--reviewed-all-close` is a manual ground-truth override for this specific false-positive set: every reviewed image is treated as close, and the candidate that triggered `fused_open` or `passed_state_gate` is used as the generation target. It bypasses model open-state, room-type, cabinet-type, texture, area, and not-door gates so all 198 reviewed images can produce one candidate pair. Without this flag, the normal conservative room, appearance, and existing-open-overlap gates remain active.
 
 ### 17.7 Recommended Config
 

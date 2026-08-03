@@ -250,13 +250,18 @@ def _seedream_prompt(
     x1, y1, x2, y2 = bbox
     if seedream_mode == "cabinet_door_open":
         return (
-            "Edit the input image itself. Open exactly one currently closed equipment-cabinet door whose closed "
-            f"door leaf is inside pixel bbox [{x1}, {y1}, {x2}, {y2}]. Open it naturally by about 45-70 degrees "
-            "around its existing hinge. Preserve the same cabinet identity, door material, color, thickness, "
-            "handle, hinge geometry, perspective, lighting, camera position, timestamp, resolution, and all "
-            "surrounding equipment. Reveal only a plausible dark cabinet interior directly behind this door. "
+            "Edit the input context crop itself. Keep exactly the same crop canvas, dimensions, perspective, and "
+            "background. Do not outpaint or reconstruct a full room. The supplied bbox is expressed in this crop "
+            "and comes from an electrical-equipment door segmentation "
+            f"model. Open exactly that one currently closed electrical control-cabinet or equipment-box door whose "
+            f"closed door leaf is inside pixel bbox [{x1}, {y1}, {x2}, {y2}]. Open it naturally by about 45-70 "
+            "degrees around its existing hinge. Preserve the same electrical cabinet identity, door material, "
+            "color, thickness, handle, hinge geometry, perspective, lighting, camera position, timestamp, "
+            "resolution, and all surrounding equipment. Reveal only a plausible electrical enclosure interior "
+            "directly behind this door. Do not turn it into a server rack, network rack, IT rack, or machine-room "
+            "rack, and do not add server trays or rack-mounted equipment. "
             "The opened door may extend immediately to the left or right of the bbox according to its hinge, "
-            "but do not alter any other cabinet door or object. Return one full-frame edited CCTV image. "
+            "but do not alter any other cabinet door or object. Return one edited crop at the same size. "
             "No second scene, no inset, no pasted rectangle, no border, no duplicated cabinet, no detached or "
             "floating door, no people, and no new text."
         )
@@ -363,11 +368,101 @@ def _response_to_dict(response: Any) -> dict[str, Any]:
     raise TypeError(f"unsupported image generation response type: {type(response)!r}")
 
 
+def _seedream_http_timeout_seconds() -> float:
+    raw = os.getenv("SEEDREAM_REQUEST_TIMEOUT_SECONDS", "300").strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("SEEDREAM_REQUEST_TIMEOUT_SECONDS must be a positive number") from exc
+    if value <= 0:
+        raise ValueError("SEEDREAM_REQUEST_TIMEOUT_SECONDS must be a positive number")
+    return value
+
+
+def _seedream_images_endpoint(endpoint: str) -> str:
+    base_url = _seedream_openai_base_url(endpoint)
+    if base_url.endswith("/images/generations"):
+        return base_url
+    return f"{base_url}/images/generations"
+
+
+def validate_api_key_for_http_header(
+    api_key: str | None,
+    *,
+    env_name: str = "ARK_API_KEY",
+) -> str:
+    value = str(api_key or "").strip()
+    if not value:
+        raise RuntimeError(f"{env_name} is required")
+    lowered = value.lower()
+    if (
+        value.startswith("<")
+        or value.endswith(">")
+        or "your api key" in lowered
+        or "ark api key" in lowered
+    ):
+        raise RuntimeError(
+            f"{env_name} still contains a documentation placeholder. "
+            f"Set {env_name} to the actual Volcengine Ark API key in the current shell."
+        )
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise RuntimeError(
+            f"{env_name} contains non-ASCII characters and cannot be used in an HTTP Authorization header. "
+            f"This usually means the example placeholder was copied literally; set the actual Ark API key."
+        ) from exc
+    if any(character.isspace() for character in value):
+        raise RuntimeError(f"{env_name} contains whitespace; set the raw Ark API key without quotes or spaces")
+    return value
+
+
+def _generate_seedream_with_http(
+    endpoint: str,
+    api_key: str,
+    request_payload: dict[str, Any],
+) -> dict[str, Any]:
+    api_key = validate_api_key_for_http_header(api_key)
+    url = _seedream_images_endpoint(endpoint)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    timeout_seconds = _seedream_http_timeout_seconds()
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            json=request_payload,
+            timeout=(15, timeout_seconds),
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            "Seedream HTTP fallback failed before receiving a response: "
+            f"{type(exc).__name__}: {exc}. Configured read timeout={timeout_seconds:g}s."
+        ) from exc
+    try:
+        raw = response.json()
+    except Exception:
+        raw = {"status_code": response.status_code, "text": response.text}
+    if not response.ok:
+        error = raw.get("error") if isinstance(raw, dict) else None
+        if isinstance(error, dict):
+            detail = error.get("message") or error.get("code") or str(error)
+        else:
+            detail = str(error or raw)
+        raise RuntimeError(f"Seedream image generation failed: HTTP {response.status_code}: {detail}")
+    raw.setdefault("_transport", "requests_fallback")
+    return raw
+
+
 def _generate_seedream_with_openai_sdk(endpoint: str, api_key: str, request_payload: dict[str, Any]) -> dict[str, Any]:
+    api_key = validate_api_key_for_http_header(api_key)
     try:
         from openai import OpenAI
-    except Exception as exc:
-        raise RuntimeError("openai is required for Seedream image generation.") from exc
+    except ImportError:
+        logger.warning("openai package is unavailable; using direct Ark HTTP image generation fallback")
+        return _generate_seedream_with_http(endpoint, api_key, request_payload)
 
     payload = dict(request_payload)
     model = str(payload.pop("model"))
