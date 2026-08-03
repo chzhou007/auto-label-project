@@ -33,7 +33,7 @@ DEFAULT_CLASSIFICATION_CHOICES = {
     "touching_equipment": ["unknown", "touching_equipment", "not_touching_equipment"],
     "fighting": ["unknown", "fighting", "not_fighting"],
     "safety_goggles": ["unknown", "wearing_safety_goggles", "no_safety_goggles"],
-    "anomaly_type": ["unknown", "diesel_leak", "oil_leak", "coolant_leak"],
+    "anomaly_type": ["unknown", "water_leak", "diesel_leak", "oil_leak", "coolant_leak"],
 }
 
 
@@ -145,25 +145,130 @@ def export_samples(samples: list[dict[str, Any]], output_path: str | Path) -> li
     return tasks
 
 
-def is_exportable_sample(sample: dict[str, Any]) -> bool:
-    return sample.get("workflow", {}).get("workflow_status") != "discarded"
+def is_generated_sample(sample: dict[str, Any]) -> bool:
+    return sample.get("image_asset", {}).get("source_type") == "generated"
 
 
-def export_metadata_dir(metadata_dir: str | Path, output_path: str | Path, update_samples: bool = False) -> list[dict[str, Any]]:
+def generated_quality_rejection(sample: dict[str, Any]) -> dict[str, Any] | None:
+    if not is_generated_sample(sample):
+        return None
+
+    object_rejections: list[dict[str, Any]] = []
+    objects = sample.get("objects", [])
+    if not objects:
+        object_rejections.append(
+            {
+                "object_id": None,
+                "reason": "generated_sample_has_no_objects",
+                "postprocess_status": None,
+                "passes_quality": False,
+            }
+        )
+
+    for obj in objects:
+        generation_params = obj.get("geometry_detail", {}).get("generation_params") or {}
+        localizer = generation_params.get("localizer") if isinstance(generation_params, dict) else None
+        localizer = localizer if isinstance(localizer, dict) else {}
+        quality = localizer.get("quality") if isinstance(localizer.get("quality"), dict) else None
+        if quality is None and isinstance(generation_params, dict):
+            quality = generation_params.get("quality") if isinstance(generation_params.get("quality"), dict) else None
+        quality = quality or {}
+
+        postprocess_status = localizer.get("postprocess_status")
+        passes_quality = bool(quality.get("passes_quality"))
+        reasons: list[str] = []
+        if postprocess_status != "success":
+            reasons.append(f"localizer_{postprocess_status or 'missing'}")
+        if not passes_quality:
+            reasons.append(f"quality_{quality.get('quality_reason') or 'failed'}")
+
+        if reasons:
+            object_rejections.append(
+                {
+                    "object_id": obj.get("object_id"),
+                    "reason": ",".join(reasons),
+                    "postprocess_status": postprocess_status,
+                    "passes_quality": passes_quality,
+                    "quality_reason": quality.get("quality_reason"),
+                    "box": obj.get("box"),
+                    "mask_uri": obj.get("geometry_detail", {}).get("mask_uri"),
+                    "localizer_used": localizer.get("used"),
+                    "fallback_used": localizer.get("fallback_used"),
+                    "debug_artifacts": localizer.get("debug_artifacts"),
+                    "metrics": localizer.get("metrics"),
+                }
+            )
+
+    if not object_rejections:
+        return None
+    return {
+        "sample_id": sample.get("sample_id"),
+        "image_uri": sample.get("image_asset", {}).get("image_uri"),
+        "source_type": sample.get("image_asset", {}).get("source_type"),
+        "object_rejections": object_rejections,
+    }
+
+
+def is_exportable_sample(sample: dict[str, Any], generated_quality_gate: bool = False) -> bool:
+    if sample.get("workflow", {}).get("workflow_status") == "discarded":
+        return False
+    if generated_quality_gate and generated_quality_rejection(sample) is not None:
+        return False
+    return True
+
+
+def default_rejected_report_path(output_path: str | Path) -> Path:
+    return Path(output_path).with_name("rejected_generated_quality.json")
+
+
+def build_export_quality_report(
+    all_samples: list[dict[str, Any]],
+    exported_samples: list[dict[str, Any]],
+    rejections: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "total_samples": len(all_samples),
+        "generated_samples": sum(1 for sample in all_samples if is_generated_sample(sample)),
+        "exported_samples": len(exported_samples),
+        "exported_generated_samples": sum(1 for sample in exported_samples if is_generated_sample(sample)),
+        "rejected_samples": len(rejections),
+        "rejections": rejections,
+    }
+
+
+def export_metadata_dir(
+    metadata_dir: str | Path,
+    output_path: str | Path,
+    update_samples: bool = False,
+    generated_quality_gate: bool = False,
+    rejected_report_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
     root = Path(metadata_dir)
-    samples = []
+    all_samples = []
+    exportable_samples = []
+    rejections = []
     for path in sorted(root.glob("*.json")):
         sample = read_json(path)
-        if not is_exportable_sample(sample):
+        all_samples.append(sample)
+        if sample.get("workflow", {}).get("workflow_status") == "discarded":
             continue
-        samples.append(sample)
+        rejection = generated_quality_rejection(sample) if generated_quality_gate else None
+        if rejection is not None:
+            rejections.append(rejection)
+            continue
+        exportable_samples.append(sample)
         if update_samples:
             sample["export"]["export_format"] = "labelstudio"
             sample["export"]["export_status"] = "exported"
             sample["export"]["export_uri"] = str(output_path)
             touch_workflow(sample, "exported")
             write_json(path, sample)
-    return export_samples(samples, output_path)
+
+    tasks = export_samples(exportable_samples, output_path)
+    if generated_quality_gate:
+        report_path = Path(rejected_report_path) if rejected_report_path else default_rejected_report_path(output_path)
+        write_json(report_path, build_export_quality_report(all_samples, exportable_samples, rejections))
+    return tasks
 
 
 def default_config_path(output_path: str | Path) -> Path:

@@ -15,8 +15,11 @@ from .config_loader import load_config
 from .contract_normalizer import normalize_autolabel_sample
 from .cropper import attach_crops, cleanup_sample_crops
 from .modules.classification import build_classification_module
+from .modules.generation.audit_sampler import write_audit_sample_csv
+from .modules.generation.benchmark import write_localizer_benchmark_reports
+from .modules.generation.metadata_builder import apply_localizer_postprocess
 from .sample_factory import make_sample, touch_workflow
-from .utils import get_image_size, read_csv, write_json
+from .utils import get_image_size, now_iso_shanghai, read_csv, resolve_path, write_json
 from .validators import validate_sample_contract
 
 
@@ -278,16 +281,73 @@ def run_direct_pipeline(
     return written
 
 
-def ingest_generated_metadata(i2i_output_root: str | Path, metadata_dir: str | Path) -> list[Path]:
+def ingest_generated_metadata(
+    i2i_output_root: str | Path,
+    metadata_dir: str | Path,
+    pipeline_config: dict[str, Any] | None = None,
+    tasks_csv: str | Path | None = None,
+    image_root: str | Path | None = None,
+) -> list[Path]:
     target_dir = Path(metadata_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
+    processed_root = target_dir.parent
+    source_rows_by_sample: dict[str, dict[str, Any]] = {}
+    if tasks_csv is not None and Path(tasks_csv).exists():
+        for row in read_csv(tasks_csv):
+            sample_id = row.get("sample_id")
+            if sample_id:
+                row = _resolve_generation_source_row(row, image_root=image_root)
+                source_rows_by_sample[sample_id] = row
+    benchmark_enabled = True
+    if pipeline_config is not None:
+        generation_module = pipeline_config.get("modules", {}).get("generation", {})
+        localizer_cfg = generation_module.get("localizer", {}) if isinstance(generation_module, dict) else {}
+        if isinstance(localizer_cfg, dict):
+            benchmark_enabled = bool(localizer_cfg.get("benchmark", True))
     written = []
+    localizer_results: list[dict[str, Any]] = []
     for sample in load_generated_samples(i2i_output_root, validate=False):
         if sample["image_asset"]["source_type"] != "generated":
             raise ValueError(f"Expected generated source_type: {sample['sample_id']}")
+        if pipeline_config is not None:
+            sample, rows = apply_localizer_postprocess(
+                sample,
+                pipeline_config=pipeline_config,
+                source_row=source_rows_by_sample.get(sample["sample_id"]),
+                processed_root=processed_root,
+            )
+            localizer_results.extend(rows)
         sample = normalize_autolabel_sample(sample)
         validate_sample_contract(sample)
         output_path = target_dir / f"{sample['sample_id']}.json"
         write_json(output_path, sample)
         written.append(output_path)
+
+    if localizer_results and benchmark_enabled:
+        log_dir = processed_root / "metadata" / "logs"
+        timestamp = now_iso_shanghai().replace(":", "").replace("+", "_").replace("-", "")
+        stem = f"localizer_benchmark_{timestamp}"
+        write_localizer_benchmark_reports(localizer_results, log_dir, stem=stem)
+        write_audit_sample_csv(localizer_results, log_dir / f"audit_sample_list_{timestamp}.csv")
     return written
+
+
+def _resolve_generation_source_row(row: dict[str, Any], image_root: str | Path | None = None) -> dict[str, Any]:
+    resolved = dict(row)
+    image_uri = str(resolved.get("image_uri") or "")
+    if not image_uri or image_root is None:
+        return resolved
+
+    candidates = [
+        resolve_path(image_uri),
+        resolve_path(image_uri, image_root),
+        Path(image_root) / Path(image_uri).name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            resolved["image_uri"] = str(candidate.resolve())
+            return resolved
+
+    candidate = resolve_path(image_uri, image_root)
+    resolved["image_uri"] = str(candidate.resolve())
+    return resolved

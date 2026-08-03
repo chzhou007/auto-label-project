@@ -1,0 +1,358 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import shutil
+import subprocess
+from typing import Any
+
+from ...model_config import get_credentials, resolve_generation_runtime
+from ...utils import read_csv, resolve_path
+from .config import filter_generation_rows
+
+
+class GenerationPreflightError(RuntimeError):
+    pass
+
+
+REFERENCE_GENERATION_ERROR = (
+    "Seedream image profile points to a reference-generation endpoint "
+    "(/images/generations), which is not a production local edit/inpaint API. "
+    "Configure a real Seedream local edit endpoint/parameters, pass an explicit "
+    "--generation-seedream-mode experiment, or set SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG=1 "
+    "only for debug experiments."
+)
+
+
+def _truthy_env(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_seedream_reference_generation_endpoint(endpoint: str | None) -> bool:
+    if not endpoint:
+        return False
+    normalized = str(endpoint).lower().rstrip("/")
+    return normalized.endswith("/images/generations") or "/images/generations" in normalized
+
+
+def _profile_endpoint(runtime: dict[str, Any]) -> str | None:
+    image_profile = runtime.get("image_profile", {}) if isinstance(runtime.get("image_profile"), dict) else {}
+    endpoint = image_profile.get("endpoint")
+    endpoint_env = image_profile.get("endpoint_env")
+    runtime_env = runtime.get("env", {}) if isinstance(runtime.get("env"), dict) else {}
+    if endpoint_env and runtime_env.get(str(endpoint_env)):
+        return str(runtime_env[str(endpoint_env)])
+    return str(endpoint) if endpoint else None
+
+
+def _seedream_experiment_config(config: dict[str, Any]) -> dict[str, Any]:
+    generation_cfg = config.get("generation", {}) if isinstance(config.get("generation"), dict) else {}
+    seedream_cfg = generation_cfg.get("seedream", {}) if isinstance(generation_cfg.get("seedream"), dict) else {}
+    return seedream_cfg
+
+
+def _seedream_experiment_enabled(seedream_cfg: dict[str, Any]) -> bool:
+    mode = str(seedream_cfg.get("mode") or "").strip()
+    return bool(seedream_cfg.get("allow_experimental_generation")) and mode in {
+        "single_image_edit",
+        "boxed_single_edit",
+        "boxed_fusion",
+    }
+
+
+def _validate_seedream_experiment_assets(seedream_cfg: dict[str, Any]) -> None:
+    mode = str(seedream_cfg.get("mode") or "").strip()
+    if mode and mode not in {"single_image_edit", "boxed_single_edit", "boxed_fusion"}:
+        raise GenerationPreflightError(f"Unsupported Seedream experiment mode: {mode}")
+    if mode != "boxed_fusion":
+        return
+    reference_dir = seedream_cfg.get("water_reference_dir")
+    if not reference_dir:
+        raise GenerationPreflightError("boxed_fusion requires generation.seedream.water_reference_dir")
+    root = Path(str(reference_dir))
+    if not root.exists() or not root.is_dir():
+        raise GenerationPreflightError(f"Seedream water reference dir not found: {root}")
+    allowed = {".jpg", ".jpeg", ".png", ".webp"}
+    if not any(path.is_file() and path.suffix.lower() in allowed for path in root.iterdir()):
+        raise GenerationPreflightError(f"Seedream water reference dir has no image files: {root}")
+
+
+def _validate_seedream_profile(runtime: dict[str, Any], require_credentials: bool, seedream_cfg: dict[str, Any]) -> None:
+    if not require_credentials:
+        return
+    image_profile = runtime.get("image_profile", {}) if isinstance(runtime.get("image_profile"), dict) else {}
+    provider = str(image_profile.get("provider") or "").lower()
+    model_name = str(runtime.get("image_model_name") or image_profile.get("model_name") or "").lower()
+    endpoint = _profile_endpoint(runtime)
+    is_seedream = provider in {"volcengine_ark", "ark", "seedream"} or "seedream" in model_name
+    if (
+        is_seedream
+        and _is_seedream_reference_generation_endpoint(endpoint)
+        and not _truthy_env("SEEDREAM_ALLOW_REFERENCE_GENERATION_DEBUG")
+        and not _seedream_experiment_enabled(seedream_cfg)
+    ):
+        raise GenerationPreflightError(REFERENCE_GENERATION_ERROR)
+
+
+def _resolve_existing_image_path(image_uri: str, image_root: str | Path) -> Path | None:
+    candidates = [
+        resolve_path(image_uri),
+        resolve_path(image_uri, image_root),
+        Path(image_root) / Path(image_uri).name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _generation_module_config(config: dict[str, Any]) -> dict[str, Any]:
+    generation_module = config.get("modules", {}).get("generation", {})
+    backend_name = generation_module.get("backend", "i2i_external")
+    backends = generation_module.get("backends", {}) if isinstance(generation_module.get("backends"), dict) else {}
+    backend_config = backends.get(backend_name, {}) if isinstance(backends.get(backend_name), dict) else {}
+    return {
+        "backend": backend_name,
+        "project_dir": backend_config.get("project_dir") or config.get("paths", {}).get("i2i_project"),
+        "entrypoint": backend_config.get("entrypoint", "src/main.py"),
+    }
+
+
+def _credential_report(config: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    credential = get_credentials(config, profile.get("credential_ref"))
+    api_key_env_names = []
+    for value in (profile.get("api_key_env") or credential.get("api_key_env"), profile.get("api_key_env_aliases")):
+        if value in ("", None, False):
+            continue
+        if isinstance(value, str):
+            candidates = [item.strip() for item in value.split(",") if item.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            candidates = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            candidates = [str(value)]
+        for candidate in candidates:
+            if candidate not in api_key_env_names:
+                api_key_env_names.append(candidate)
+    configured_value = profile.get("api_key") or credential.get("api_key")
+    return {
+        "api_key_env": api_key_env_names[0] if api_key_env_names else None,
+        "api_key_env_aliases": api_key_env_names[1:],
+        "present": bool(configured_value) or any(os.getenv(str(name)) for name in api_key_env_names),
+    }
+
+
+def _is_mmseg_selector(runtime: dict[str, Any]) -> bool:
+    return str(runtime.get("selector_backend") or "").strip() == "mmseg_floor_selector"
+
+
+def _resolve_executable(value: str | None) -> str | None:
+    if not value:
+        return None
+    candidate = Path(str(value))
+    if candidate.is_file():
+        return str(candidate.resolve())
+    return shutil.which(str(value))
+
+
+def _resolve_runtime_file(value: Any) -> Path | None:
+    if value in ("", None):
+        return None
+    return Path(str(value)).resolve()
+
+
+def _validate_mmseg_selector(runtime: dict[str, Any], require_runtime: bool) -> dict[str, Any] | None:
+    if not _is_mmseg_selector(runtime):
+        return None
+    profile = runtime.get("selector_profile", {}) if isinstance(runtime.get("selector_profile"), dict) else {}
+    report = {
+        "python": profile.get("python"),
+        "worker": profile.get("worker"),
+        "config": profile.get("config"),
+        "checkpoint": profile.get("checkpoint"),
+        "device": profile.get("device"),
+    }
+    if not require_runtime:
+        return report
+
+    python_executable = _resolve_executable(str(profile.get("python") or ""))
+    if not python_executable:
+        raise GenerationPreflightError(
+            "MMSeg floor selector Python not found. Set MMSEG_FLOOR_PYTHON or "
+            "--generation-floor-python to a Python 3.10 OpenMMLab environment."
+        )
+    worker = _resolve_runtime_file(profile.get("worker"))
+    config_path = _resolve_runtime_file(profile.get("config"))
+    checkpoint = _resolve_runtime_file(profile.get("checkpoint"))
+    for label, path in (("worker", worker), ("config", config_path), ("checkpoint", checkpoint)):
+        if path is None or not path.is_file():
+            raise GenerationPreflightError(f"MMSeg floor selector {label} not found: {path}")
+
+    check = subprocess.run(
+        [
+            python_executable,
+            "-c",
+            "import torch, mmcv, mmengine, mmseg; "
+            "assert tuple(int(x) for x in mmseg.__version__.split('.')[:2]) >= (1, 0)",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    if check.returncode != 0:
+        detail = check.stderr.strip() or check.stdout.strip() or f"exit code {check.returncode}"
+        raise GenerationPreflightError(f"MMSeg floor selector environment check failed: {detail}")
+    compatibility = subprocess.run(
+        [
+            python_executable,
+            str(worker),
+            "--check-only",
+            "--config",
+            str(config_path),
+            "--checkpoint",
+            str(checkpoint),
+            "--device",
+            str(profile.get("device") or "cuda:0"),
+            "--model-name",
+            str(runtime.get("selector_model_name") or "segformer_mit-b0-roadline1000"),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=300,
+    )
+    if compatibility.returncode != 0:
+        detail = (
+            compatibility.stderr.strip()
+            or compatibility.stdout.strip()
+            or f"exit code {compatibility.returncode}"
+        )
+        raise GenerationPreflightError(f"MMSeg floor selector checkpoint compatibility check failed: {detail}")
+    report.update(
+        {
+            "python": python_executable,
+            "worker": str(worker),
+            "config": str(config_path),
+            "checkpoint": str(checkpoint),
+            "compatibility": compatibility.stdout.strip(),
+        }
+    )
+    return report
+
+
+def _validate_mmseg_edit_box(runtime: dict[str, Any], seedream_cfg: dict[str, Any]) -> None:
+    if not _is_mmseg_selector(runtime):
+        return
+    mode = str(seedream_cfg.get("mode") or "").strip()
+    if mode not in {"boxed_single_edit", "boxed_fusion"}:
+        return
+    minimum = int(seedream_cfg.get("red_box_min_size", 200))
+    maximum = int(seedream_cfg.get("red_box_max_size", 200))
+    if minimum != 200 or maximum != 200:
+        raise GenerationPreflightError(
+            "MMSeg floor selection requires a fixed 200x200 edit box; "
+            f"got min={minimum}, max={maximum}"
+        )
+
+
+def run_generation_preflight(
+    config: dict[str, Any],
+    tasks_csv: str | Path,
+    image_root: str | Path,
+    output_root: str | Path,
+    limit: int | None = None,
+    require_credentials: bool = True,
+) -> dict[str, Any]:
+    tasks_path = Path(tasks_csv)
+    if not tasks_path.exists():
+        raise GenerationPreflightError(f"Generation manifest not found: {tasks_path}")
+
+    all_rows = read_csv(tasks_path)
+    rows = filter_generation_rows(str(tasks_path))
+    if not rows:
+        return {
+            "skipped": True,
+            "manifest_rows": len(all_rows),
+            "generation_rows": 0,
+        }
+    if limit is not None and limit > len(rows):
+        raise GenerationPreflightError(
+            f"Generation limit {limit} exceeds available generation rows {len(rows)} in {tasks_path}"
+        )
+
+    missing_required = []
+    missing_images = []
+    for row in rows[:limit]:
+        sample_id = row.get("sample_id") or "<missing sample_id>"
+        for field in ("sample_id", "image_id", "image_uri", "anomaly_type"):
+            if not row.get(field):
+                missing_required.append(f"{sample_id}:{field}")
+        image_uri = row.get("image_uri")
+        if image_uri and _resolve_existing_image_path(image_uri, image_root) is None:
+            missing_images.append(f"{sample_id}:{image_uri}")
+
+    if missing_required:
+        preview = ", ".join(missing_required[:10])
+        raise GenerationPreflightError(f"Generation manifest has missing required values: {preview}")
+    if missing_images:
+        preview = ", ".join(missing_images[:10])
+        raise GenerationPreflightError(f"Generation manifest references missing images: {preview}")
+
+    module_config = _generation_module_config(config)
+    project_dir = Path(str(module_config.get("project_dir") or "external/I2I"))
+    entrypoint = project_dir / str(module_config.get("entrypoint") or "src/main.py")
+    if not entrypoint.exists():
+        raise GenerationPreflightError(f"I2I entrypoint not found: {entrypoint}")
+
+    output_path = Path(output_root).resolve()
+    image_root_path = Path(image_root).resolve()
+    if output_path == image_root_path:
+        raise GenerationPreflightError(f"Generation output root must be isolated from image root: {output_path}")
+
+    anomaly_types = sorted({row.get("anomaly_type") or "default" for row in rows[:limit]})
+    seedream_cfg = _seedream_experiment_config(config)
+    _validate_seedream_experiment_assets(seedream_cfg)
+    runtime_by_anomaly: dict[str, dict[str, Any]] = {}
+    credential_checks: list[dict[str, Any]] = []
+    selector_checks: list[dict[str, Any]] = []
+    for anomaly_type in anomaly_types:
+        runtime = resolve_generation_runtime(config, anomaly_type=anomaly_type)
+        _validate_seedream_profile(runtime, require_credentials=require_credentials, seedream_cfg=seedream_cfg)
+        _validate_mmseg_edit_box(runtime, seedream_cfg)
+        selector_check = _validate_mmseg_selector(runtime, require_runtime=require_credentials)
+        if selector_check is not None:
+            selector_checks.append(selector_check)
+        runtime_by_anomaly[anomaly_type] = {
+            "selector_backend": runtime.get("selector_backend"),
+            "selector_model_name": runtime.get("selector_model_name"),
+            "vlm_model_name": runtime.get("vlm_model_name"),
+            "image_model_name": runtime.get("image_model_name"),
+        }
+        if not _is_mmseg_selector(runtime):
+            credential_checks.append(_credential_report(config, runtime.get("selector_profile", {})))
+        credential_checks.append(_credential_report(config, runtime.get("image_profile", {})))
+
+    missing_credentials = [
+        check.get("api_key_env") or "<inline api_key>"
+        for check in credential_checks
+        if not check.get("present")
+    ]
+    if require_credentials and missing_credentials:
+        unique_missing = sorted({str(value) for value in missing_credentials})
+        raise GenerationPreflightError(
+            "Missing generation API credentials for: " + ", ".join(unique_missing)
+        )
+
+    return {
+        "skipped": False,
+        "manifest_rows": len(all_rows),
+        "generation_rows": len(rows),
+        "effective_generation_rows": min(len(rows), limit) if limit is not None else len(rows),
+        "anomaly_types": anomaly_types,
+        "runtime_by_anomaly": runtime_by_anomaly,
+        "i2i_entrypoint": str(entrypoint),
+        "i2i_project_dir_env": os.getenv("I2I_PROJECT_DIR"),
+        "output_root": str(output_path),
+        "credential_checks": credential_checks,
+        "selector_checks": selector_checks,
+    }

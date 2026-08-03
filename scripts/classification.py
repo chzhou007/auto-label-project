@@ -26,9 +26,9 @@ except ImportError:
     OpenAI = None
 
 
-DEFAULT_API_URL = os.getenv("QWEN397B_API_URL", "https://deepseek.gds-services.com/vllm-qwen35b/v1")
+DEFAULT_API_URL = os.getenv("QWEN397B_API_URL", "https://deepseek.gds-services.com/v1")
 DEFAULT_API_KEY = os.getenv("QWEN397B_API_KEY", "")
-DEFAULT_MODEL = os.getenv("QWEN397B_MODEL", "aios-smart-eye-vlm")
+DEFAULT_MODEL = os.getenv("QWEN397B_MODEL", "qwen3.6-27b")
 DEFAULT_MAX_TOKENS = int(os.getenv("QWEN397B_MAX_TOKENS", "2000"))
 DEFAULT_REQUEST_IMAGE_MAX_SIDE = int(os.getenv("QWEN397B_REQUEST_IMAGE_MAX_SIDE", "1024"))
 DEFAULT_MIN_CROP_WIDTH = int(os.getenv("QWEN397B_MIN_CROP_WIDTH", "4"))

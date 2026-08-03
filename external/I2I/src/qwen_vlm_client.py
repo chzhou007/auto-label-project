@@ -1,0 +1,677 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import time
+from typing import Any
+
+import requests
+
+from config import DashScopeConfig, I2IServiceConfig, ModelServiceConfig, VALID_GRIDS
+from grid import normalize_grid_id
+from prompts import build_vlm_prompt
+from utils import image_to_data_url, redact_headers, write_json
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_json(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.I).strip()
+        cleaned = re.sub(r"```$", "", cleaned).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, flags=re.S)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
+def _extract_text_from_response(response: dict[str, Any]) -> str:
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text") or item.get("content") or ""))
+                elif isinstance(item, str):
+                    parts.append(item)
+            return "\n".join(parts)
+        if isinstance(content, str):
+            return content
+
+    output = response.get("output", {})
+    if isinstance(output, list):
+        parts: list[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content", [])
+            if isinstance(content, str):
+                parts.append(content)
+                continue
+            if not isinstance(content, list):
+                continue
+            for content_item in content:
+                if isinstance(content_item, str):
+                    parts.append(content_item)
+                elif isinstance(content_item, dict):
+                    text = content_item.get("text") or content_item.get("output_text")
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+        if parts:
+            return "\n".join(parts)
+        output_text = response.get("output_text")
+        if isinstance(output_text, str) and output_text:
+            return output_text
+        raise ValueError("unable to extract VLM text from Ark Responses output")
+
+    choices = output.get("choices")
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    parts.append(item.get("text", ""))
+                elif isinstance(item, str):
+                    parts.append(item)
+            return "\n".join(parts)
+        if isinstance(content, str):
+            return content
+    text = output.get("text")
+    if isinstance(text, str):
+        return text
+    raise ValueError(f"unable to extract VLM text from response keys: {list(response.keys())}")
+
+
+def _service_endpoint(config: ModelServiceConfig | DashScopeConfig) -> str:
+    endpoint = getattr(config, "endpoint", None) or getattr(config, "vlm_endpoint", None)
+    if not endpoint:
+        raise ValueError("VLM endpoint is required")
+    return str(endpoint)
+
+
+def _is_openai_compatible(config: ModelServiceConfig | DashScopeConfig, endpoint: str) -> bool:
+    provider = str(getattr(config, "provider", "") or "").lower()
+    if provider in {"openai_compatible", "openai-compatible", "qwen397b", "qwen"}:
+        return True
+    normalized = endpoint.rstrip("/")
+    return normalized.endswith("/v1") or normalized.endswith("/chat/completions")
+
+
+def _is_ark_responses(config: ModelServiceConfig | DashScopeConfig, endpoint: str) -> bool:
+    provider = str(getattr(config, "provider", "") or "").lower()
+    return provider in {
+        "volcengine_ark_responses",
+        "ark_responses",
+        "ark-responses",
+    } or endpoint.rstrip("/").endswith("/responses")
+
+
+def _candidate_request_endpoints(endpoint: str) -> list[str]:
+    normalized = endpoint.rstrip("/")
+    explicit = os.getenv("QWEN397B_CHAT_COMPLETIONS_URL")
+    candidates: list[str] = []
+    if explicit:
+        candidates.append(explicit.rstrip("/"))
+    if normalized.endswith("/chat/completions"):
+        candidates.append(normalized)
+    else:
+        candidates.extend([f"{normalized}/chat/completions", normalized])
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
+def _response_error_summary(raw: dict[str, Any]) -> str:
+    message = raw.get("error") or raw.get("message") or raw.get("text")
+    if isinstance(message, dict):
+        message = message.get("message") or message.get("code") or str(message)
+    if not isinstance(message, str):
+        message = str(raw) if raw else ""
+    return message[:500]
+
+
+def _use_response_format() -> bool:
+    return os.getenv("QWEN397B_USE_RESPONSE_FORMAT", "1").lower() not in {"0", "false", "no"}
+
+
+def _vlm_image_max_bytes() -> int:
+    raw = os.getenv("QWEN397B_IMAGE_MAX_BYTES", "6000000").strip()
+    if not raw:
+        return 6_000_000
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("QWEN397B_IMAGE_MAX_BYTES must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError("QWEN397B_IMAGE_MAX_BYTES must be a positive integer")
+    return value
+
+
+def _ark_responses_thinking_type() -> str | None:
+    value = os.getenv("ARK_VLM_THINKING", "disabled").strip().lower()
+    if value in {"", "auto", "default"}:
+        return None
+    if value not in {"disabled", "enabled"}:
+        raise ValueError("ARK_VLM_THINKING must be disabled, enabled, or auto")
+    return value
+
+
+def _ark_responses_max_output_tokens() -> int:
+    raw = os.getenv("ARK_VLM_MAX_OUTPUT_TOKENS", "512").strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("ARK_VLM_MAX_OUTPUT_TOKENS must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError("ARK_VLM_MAX_OUTPUT_TOKENS must be a positive integer")
+    return value
+
+
+def validate_vlm_selection(payload: dict[str, Any]) -> dict[str, Any]:
+    selected = normalize_grid_id(str(payload.get("selected_grid", "")))
+    candidates = payload.get("top_candidates") or []
+    clean_candidates = []
+    if isinstance(candidates, list):
+        for item in candidates[:3]:
+            if not isinstance(item, dict):
+                continue
+            grid = normalize_grid_id(str(item.get("grid", "")))
+            if grid in VALID_GRIDS:
+                try:
+                    score = float(item.get("score", 0.0))
+                except (TypeError, ValueError):
+                    score = 0.0
+                clean_candidates.append({"grid": grid, "score": max(0.0, min(1.0, score))})
+
+    if selected not in VALID_GRIDS and clean_candidates:
+        selected = clean_candidates[0]["grid"]
+    if selected not in VALID_GRIDS:
+        raise ValueError("VLM response has no valid selected_grid")
+    if not clean_candidates:
+        clean_candidates = [{"grid": selected, "score": float(payload.get("confidence", 0.0) or 0.0)}]
+
+    try:
+        confidence = float(payload.get("confidence", clean_candidates[0]["score"]))
+    except (TypeError, ValueError):
+        confidence = clean_candidates[0]["score"]
+
+    return {
+        "selected_grid": selected,
+        "confidence": max(0.0, min(1.0, confidence)),
+        "top_candidates": clean_candidates[:3],
+        "reason": str(payload.get("reason", "")),
+        "edit_region_hint": str(payload.get("edit_region_hint", "")),
+    }
+
+
+def validate_cabinet_door_selection(
+    payload: dict[str, Any],
+    image_size: tuple[int, int],
+    *,
+    min_confidence: float = 0.70,
+) -> dict[str, Any]:
+    status = str(payload.get("status", "")).strip().lower()
+    reason = str(payload.get("reason", "")).strip()
+    try:
+        confidence = max(0.0, min(1.0, float(payload.get("confidence", 0.0))))
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    if status in {"skip", "skipped", "no_target", "none"}:
+        return {
+            "status": "skipped",
+            "confidence": confidence,
+            "reason": reason or "no suitable closed cabinet door",
+            "bbox": None,
+            "bbox_1000": None,
+        }
+    if status not in {"selected", "select", "ok"}:
+        raise ValueError(f"Qwen cabinet-door response has invalid status: {status!r}")
+    if confidence < min_confidence:
+        return {
+            "status": "skipped",
+            "confidence": confidence,
+            "reason": reason or f"selection confidence below {min_confidence:.2f}",
+            "bbox": None,
+            "bbox_1000": None,
+        }
+
+    raw_bbox = payload.get("bbox_1000") or payload.get("bbox")
+    if isinstance(raw_bbox, dict):
+        raw_bbox = [raw_bbox.get(key) for key in ("x1", "y1", "x2", "y2")]
+    if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+        raise ValueError("Qwen cabinet-door response has no valid bbox_1000")
+    try:
+        x1n, y1n, x2n, y2n = [float(value) for value in raw_bbox]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Qwen cabinet-door bbox_1000 must contain numbers") from exc
+    x1n, x2n = sorted((max(0.0, min(1000.0, x1n)), max(0.0, min(1000.0, x2n))))
+    y1n, y2n = sorted((max(0.0, min(1000.0, y1n)), max(0.0, min(1000.0, y2n))))
+    if x2n - x1n < 15 or y2n - y1n < 15:
+        raise ValueError(f"Qwen cabinet-door bbox_1000 is too small: {[x1n, y1n, x2n, y2n]}")
+
+    width, height = image_size
+    bbox = (
+        max(0, min(width - 1, round(x1n * width / 1000.0))),
+        max(0, min(height - 1, round(y1n * height / 1000.0))),
+        max(1, min(width, round(x2n * width / 1000.0))),
+        max(1, min(height, round(y2n * height / 1000.0))),
+    )
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        raise ValueError(f"Qwen cabinet-door bbox is empty after scaling: {bbox}")
+    area_ratio = ((bbox[2] - bbox[0]) * (bbox[3] - bbox[1])) / float(width * height)
+    short_side = min(bbox[2] - bbox[0], bbox[3] - bbox[1])
+    if area_ratio < 0.0008 or short_side < 35:
+        return {
+            "status": "skipped",
+            "confidence": confidence,
+            "reason": reason or "selected cabinet door is too small for reliable editing",
+            "bbox": None,
+            "bbox_1000": [x1n, y1n, x2n, y2n],
+        }
+    return {
+        "status": "selected",
+        "confidence": confidence,
+        "reason": reason,
+        "bbox": list(bbox),
+        "bbox_1000": [x1n, y1n, x2n, y2n],
+        "target_description": str(payload.get("target_description", "")).strip(),
+        "hinge_side": str(payload.get("hinge_side", "unknown")).strip().lower(),
+        "area_ratio": area_ratio,
+    }
+
+
+def build_cabinet_door_bbox_prompt() -> str:
+    return """You select exactly one currently CLOSED equipment-cabinet door leaf in an industrial CCTV image.
+
+Select a real equipment cabinet, electrical cabinet, control cabinet, server cabinet, battery cabinet, or machine enclosure door that is clearly visible and can plausibly swing open. Prefer one large, unobstructed, front-facing or mildly oblique door leaf.
+
+Do not select an already open door, exposed rack interior, room entrance door, fire door, wall, window, removable panel without a hinge, tiny junction box, person, reflection, or image overlay. If no suitable closed equipment-cabinet door is visible, return status "skip".
+
+Coordinates must use a normalized 0-1000 coordinate system relative to the full image. The bbox must tightly cover the visible closed door leaf, excluding surrounding cabinet body, handles protruding outside the leaf, labels, and aisle.
+
+Return JSON only:
+{
+  "status": "selected" or "skip",
+  "bbox_1000": [x1, y1, x2, y2] or null,
+  "confidence": 0.0,
+  "hinge_side": "left" or "right" or "unknown",
+  "target_description": "short target description",
+  "reason": "short reason"
+}"""
+
+
+class QwenVLMClient:
+    def __init__(
+        self,
+        model: str,
+        dashscope_config: ModelServiceConfig | DashScopeConfig,
+        dry_run: bool = False,
+        *,
+        request_timeout_seconds: float = 300.0,
+        max_retries: int = 0,
+    ):
+        self.model = model
+        self.config = dashscope_config
+        self.dry_run = dry_run
+        if request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+        self.request_timeout_seconds = float(request_timeout_seconds)
+        self.max_retries = int(max_retries)
+
+    def _build_request_payloads(self, grid_image_path: str, prompt: str) -> tuple[list[str], dict[str, Any], dict[str, Any]]:
+        endpoint = _service_endpoint(self.config)
+        image_bytes = Path(grid_image_path).stat().st_size
+        max_image_bytes = _vlm_image_max_bytes()
+        if image_bytes > max_image_bytes:
+            raise RuntimeError(
+                "Qwen request image too large after grid preview compression: "
+                f"{image_bytes} bytes > {max_image_bytes} bytes; lower QWEN_GRID_PREVIEW_MAX_SIDE "
+                "or QWEN_GRID_PREVIEW_JPEG_QUALITY"
+            )
+        image_data_url = image_to_data_url(grid_image_path)
+        if _is_ark_responses(self.config, endpoint):
+            body = {
+                "model": self.model,
+                "store": False,
+                "max_output_tokens": _ark_responses_max_output_tokens(),
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_image", "image_url": image_data_url},
+                            {"type": "input_text", "text": prompt},
+                        ],
+                    }
+                ],
+            }
+            thinking_type = _ark_responses_thinking_type()
+            if thinking_type:
+                body["thinking"] = {"type": thinking_type}
+            log_body = {
+                **body,
+                "image_bytes": image_bytes,
+                "image_max_bytes": max_image_bytes,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_image", "image_url": grid_image_path},
+                            {"type": "input_text", "text": prompt},
+                        ],
+                    }
+                ],
+            }
+            return [endpoint.rstrip("/")], body, log_body
+
+        if _is_openai_compatible(self.config, endpoint):
+            request_endpoints = _candidate_request_endpoints(endpoint)
+            body: dict[str, Any] = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                        ],
+                    }
+                ],
+                "temperature": 0,
+                "max_tokens": int(os.getenv("QWEN397B_MAX_TOKENS", "1000")),
+            }
+            if _use_response_format():
+                body["response_format"] = {"type": "json_object"}
+            log_body = {
+                **body,
+                "image_bytes": image_bytes,
+                "image_max_bytes": max_image_bytes,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": grid_image_path}},
+                        ],
+                    }
+                ],
+            }
+            return request_endpoints, body, log_body
+
+        body = {
+            "model": self.model,
+            "input": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"image": image_data_url},
+                            {"text": prompt},
+                        ],
+                    }
+                ]
+            },
+            "parameters": {"result_format": "message"},
+        }
+        log_body = {
+            "model": self.model,
+            "image_bytes": image_bytes,
+            "image_max_bytes": max_image_bytes,
+            "input": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"image_path": grid_image_path},
+                            {"text": prompt},
+                        ],
+                    }
+                ]
+            },
+            "parameters": {"result_format": "message"},
+        }
+        return [endpoint], body, log_body
+
+    def select_grid_with_qwen(
+        self,
+        grid_image_path: str,
+        anomaly_type: str,
+        log_path: str | None = None,
+    ) -> dict[str, Any]:
+        if self.dry_run:
+            result = {
+                "selected_grid": "C2",
+                "confidence": 0.80,
+                "top_candidates": [
+                    {"grid": "C2", "score": 0.80},
+                    {"grid": "C3", "score": 0.65},
+                    {"grid": "B2", "score": 0.55},
+                ],
+                "reason": "dry-run 默认选择机组中下部区域",
+                "edit_region_hint": "在设备中下部连接件或地面交界处生成泄漏",
+                "raw_response": {"dry_run": True},
+            }
+            if log_path:
+                write_json(log_path, result)
+            return result
+
+        if not self.config.api_key:
+            api_key_env = getattr(self.config, "api_key_env", None) or "QWEN397B_API_KEY"
+            raise RuntimeError(f"VLM API key is required unless --dry-run is used; set {api_key_env}")
+
+        prompt = build_vlm_prompt(anomaly_type)
+        endpoints, body, log_body = self._build_request_payloads(grid_image_path, prompt)
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+        request_log: dict[str, Any] = {
+            "endpoint": endpoints[0],
+            "endpoint_attempts": endpoints,
+            "provider": self.config.provider,
+            "headers": redact_headers(headers),
+            "body": log_body,
+        }
+        raw: dict[str, Any] = {}
+        status_code = 0
+        used_endpoint = endpoints[0]
+        failed_attempts: list[dict[str, Any]] = []
+        for index, endpoint in enumerate(endpoints):
+            used_endpoint = endpoint
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=body,
+                timeout=(15, self.request_timeout_seconds),
+            )
+            status_code = response.status_code
+            try:
+                raw = response.json()
+            except Exception:
+                raw = {"status_code": response.status_code, "text": response.text}
+            if response.ok:
+                break
+            failed_attempts.append(
+                {
+                    "endpoint": endpoint,
+                    "status_code": status_code,
+                    "response_summary": _response_error_summary(raw),
+                }
+            )
+            if status_code == 404 and index + 1 < len(endpoints):
+                continue
+            if log_path:
+                request_log["endpoint"] = used_endpoint
+                request_log["failed_attempts"] = failed_attempts
+                write_json(log_path, {"request": request_log, "response": raw})
+            raise RuntimeError(
+                "Qwen request failed: "
+                f"HTTP {status_code} endpoint={used_endpoint} response={_response_error_summary(raw)}"
+            )
+        else:
+            if log_path:
+                request_log["endpoint"] = used_endpoint
+                request_log["failed_attempts"] = failed_attempts
+                write_json(log_path, {"request": request_log, "response": raw})
+            raise RuntimeError(f"Qwen request failed: HTTP {status_code} endpoint={used_endpoint}")
+
+        text = _extract_text_from_response(raw)
+        parsed = validate_vlm_selection(_extract_json(text))
+        parsed["raw_response"] = raw
+        if log_path:
+            request_log["endpoint"] = used_endpoint
+            if failed_attempts:
+                request_log["failed_attempts"] = failed_attempts
+            write_json(log_path, {"request": request_log, "parsed": parsed, "response": raw})
+        return parsed
+
+    def select_cabinet_door_bbox(
+        self,
+        image_path: str,
+        image_size: tuple[int, int],
+        log_path: str | None = None,
+        *,
+        min_confidence: float = 0.70,
+    ) -> dict[str, Any]:
+        if self.dry_run:
+            width, height = image_size
+            bbox = [round(width * 0.35), round(height * 0.20), round(width * 0.60), round(height * 0.80)]
+            result = {
+                "status": "selected",
+                "confidence": 0.80,
+                "reason": "dry-run deterministic cabinet-door selection",
+                "bbox": bbox,
+                "bbox_1000": [350, 200, 600, 800],
+                "target_description": "dry-run closed equipment cabinet door",
+                "hinge_side": "left",
+                "area_ratio": ((bbox[2] - bbox[0]) * (bbox[3] - bbox[1])) / float(width * height),
+                "raw_response": {"dry_run": True},
+            }
+            if log_path:
+                write_json(log_path, result)
+            return result
+
+        if not self.config.api_key:
+            api_key_env = getattr(self.config, "api_key_env", None) or "QWEN397B_API_KEY"
+            raise RuntimeError(f"VLM API key is required unless --dry-run is used; set {api_key_env}")
+
+        prompt = build_cabinet_door_bbox_prompt()
+        endpoints, body, log_body = self._build_request_payloads(image_path, prompt)
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+        request_log: dict[str, Any] = {
+            "endpoint": endpoints[0],
+            "endpoint_attempts": endpoints,
+            "provider": self.config.provider,
+            "headers": redact_headers(headers),
+            "body": log_body,
+        }
+        raw: dict[str, Any] = {}
+        failed_attempts: list[dict[str, Any]] = []
+        used_endpoint = endpoints[0]
+        for index, endpoint in enumerate(endpoints):
+            used_endpoint = endpoint
+            response = None
+            for attempt in range(self.max_retries + 1):
+                try:
+                    response = requests.post(
+                        endpoint,
+                        headers=headers,
+                        json=body,
+                        timeout=(15, self.request_timeout_seconds),
+                    )
+                    break
+                except requests.RequestException as exc:
+                    failed_attempts.append(
+                        {
+                            "endpoint": endpoint,
+                            "attempt": attempt + 1,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                            "timeout_seconds": self.request_timeout_seconds,
+                        }
+                    )
+                    if log_path:
+                        request_log["endpoint"] = used_endpoint
+                        request_log["failed_attempts"] = failed_attempts
+                        write_json(
+                            log_path,
+                            {
+                                "request": request_log,
+                                "error": {
+                                    "type": type(exc).__name__,
+                                    "message": str(exc),
+                                },
+                            },
+                        )
+                    if attempt >= self.max_retries:
+                        raise RuntimeError(
+                            "VLM selector request failed before receiving a response: "
+                            f"{type(exc).__name__}: {exc}. "
+                            f"Configured read timeout={self.request_timeout_seconds:g}s."
+                        ) from exc
+                    time.sleep(min(2**attempt, 8))
+            if response is None:
+                raise RuntimeError("VLM selector request produced no response")
+            try:
+                raw = response.json()
+            except Exception:
+                raw = {"status_code": response.status_code, "text": response.text}
+            if response.ok:
+                break
+            failed_attempts.append(
+                {
+                    "endpoint": endpoint,
+                    "status_code": response.status_code,
+                    "response_summary": _response_error_summary(raw),
+                }
+            )
+            if response.status_code == 404 and index + 1 < len(endpoints):
+                continue
+            if log_path:
+                request_log["endpoint"] = used_endpoint
+                request_log["failed_attempts"] = failed_attempts
+                write_json(log_path, {"request": request_log, "response": raw})
+            raise RuntimeError(
+                "Qwen request failed: "
+                f"HTTP {response.status_code} endpoint={used_endpoint} response={_response_error_summary(raw)}"
+            )
+        else:
+            raise RuntimeError(f"Qwen request failed for all endpoints: {endpoints}")
+
+        parsed_payload = _extract_json(_extract_text_from_response(raw))
+        parsed = validate_cabinet_door_selection(
+            parsed_payload,
+            image_size,
+            min_confidence=min_confidence,
+        )
+        parsed["raw_response"] = raw
+        if log_path:
+            request_log["endpoint"] = used_endpoint
+            if failed_attempts:
+                request_log["failed_attempts"] = failed_attempts
+            write_json(log_path, {"request": request_log, "parsed": parsed, "response": raw})
+        return parsed
+
+
+def select_grid_with_qwen(grid_image_path: str, anomaly_type: str) -> dict[str, Any]:
+    client = QwenVLMClient("qwen3.6-27b", I2IServiceConfig.from_env().vlm)
+    return client.select_grid_with_qwen(grid_image_path, anomaly_type)

@@ -15,15 +15,19 @@ credentials:
     api_key_env: DASHSCOPE_API_KEY
     api_key: ${DASHSCOPE_API_KEY}
 
+  ark_seedream_generation:
+    api_key_env: ARK_API_KEY
+    api_key: ${ARK_API_KEY}
+
   qwen_classifier:
     api_key_env: QWEN397B_API_KEY
     api_key: ${QWEN397B_API_KEY}
-    base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+    base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/v1}
 
   qwen_geometry_vlm:
     api_key_env: QWEN397B_API_KEY
     api_key: ${QWEN397B_API_KEY}
-    base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+    base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/v1}
 
   local_or_private_model:
     api_key_env: PRIVATE_MODEL_API_KEY
@@ -31,7 +35,7 @@ credentials:
     base_url: ${PRIVATE_MODEL_BASE_URL}
 
 paths:
-  i2i_project: C:\Users\chang\Documents\数据标注\I2I
+  i2i_project: ${I2I_PROJECT_DIR:-external/I2I}
   classification_script: scripts/classification.py
   raw_images_dir: data/raw/images
   raw_videos_dir: data/raw/videos
@@ -48,11 +52,62 @@ paths:
 # 当前 backend 仍可兼容已有 I2I 项目和 classification.py；后续可以把实现迁入本仓库后替换 backend。
 modules:
   generation:
-    backend: i2i_external
+    backend: vlm_wan_autolabel
+    localizer:
+      primary: pgcd_lpips
+      fallback: rgb_diff
+      benchmark: true
+      debug: false
+      allow_quality_fallback: true
+      sidecar_eval: null
+      quality:
+        profiles:
+          default:
+            background_preservation_min: 0.60
+            anomaly_visibility_min: 0.02
+            prompt_iou_min: 0.01
+          water_leak:
+            background_preservation_min: 0.65
+            anomaly_visibility_min: 0.02
+            prompt_iou_min: 0.02
+      pgcd:
+        threshold: otsu
+        min_component_area: 300
+        max_global_change_ratio: 0.25
+        lpips_backbone: alex
+        lpips_input_max_side: 768
+        heatmap_normalization: percentile
+        heatmap_percentile_low: 1
+        heatmap_percentile_high: 99
+        prompt_prior_weights:
+          area: 0.30
+          lpips: 0.40
+          iou: 0.20
+          distance: 0.10
+      sam2:
+        enabled: false
+        model: tiny
+    localizer_policy:
+      water_leak:
+        primary: pgcd_lpips
+        fallback: rgb_diff
+      coolant_leak:
+        primary: pgcd_lpips
+        fallback: rgb_diff
+      diesel_leak:
+        primary: rgb_diff
+        fallback: pgcd_lpips
+      oil_leak:
+        primary: rgb_diff
+        fallback: pgcd_lpips
     backends:
       i2i_external:
-        project_dir: C:\Users\chang\Documents\数据标注\I2I
+        project_dir: ${I2I_PROJECT_DIR:-external/I2I}
         entrypoint: src/main.py
+      vlm_wan_autolabel:
+        project_dir: ${I2I_PROJECT_DIR:-external/I2I}
+        entrypoint: src/main.py
+        pass_localizer_cli_args: false
 
   classification:
     backend: external_script
@@ -74,21 +129,45 @@ modules:
 # 模型注册表。新增或替换模型时，只改这里和下面的 active/model_ref。
 models:
   generation:
+    active_selector: mmseg_floor_selector
     active_vlm: qwen_grid_selector
-    active_image_generator: wan_image_editor
+    active_image_generator: seedream5_image_editor
+    selectors:
+      mmseg_floor_selector:
+        provider: local_mmseg_worker
+        model_name: segformer_mit-b0-roadline1000
+        model_version: best_mIoU_iter_3000
+        python: ${MMSEG_FLOOR_PYTHON}
+        worker: external/floor_segmentation/worker.py
+        config: external/floor_segmentation/configs/segformer_mit-b0_roadline_inference.py
+        checkpoint: ${MMSEG_FLOOR_CHECKPOINT}
+        device: ${MMSEG_FLOOR_DEVICE:-cuda:0}
+        road_class_id: 2
+        line_class_id: 1
+        road_coverage_min: 0.95
+        line_coverage_max: 0.05
+
+      qwen_grid_selector:
+        provider: qwen_vlm
+        model_ref: qwen_grid_selector
+
     vlm:
       qwen_grid_selector:
-        provider: dashscope
-        model_name: aios-smart-eye-vlm
+        provider: openai_compatible
+        model_name: ${QWEN_GRID_SELECTOR_MODEL:-qwen3.6-27b}
         model_version: null
-        credential_ref: dashscope_generation
-        api_key_env: DASHSCOPE_API_KEY
-        endpoint_env: DASHSCOPE_VLM_ENDPOINT
-        endpoint: ${DASHSCOPE_VLM_ENDPOINT}
+        credential_ref: qwen_classifier
+        api_key_env: QWEN397B_API_KEY
+        api_key_env_aliases:
+          - DASHSCOPE_API_KEY
+        endpoint_env: QWEN397B_API_URL
+        endpoint_env_aliases:
+          - DASHSCOPE_VLM_ENDPOINT
+        endpoint: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/v1}
 
       custom_grid_selector:
         provider: custom
-        model_name: replace_with_vlm_model
+        model_name: ${CUSTOM_VLM_MODEL:-replace_with_vlm_model}
         model_version: null
         credential_ref: local_or_private_model
         api_key_env: PRIVATE_MODEL_API_KEY
@@ -105,6 +184,20 @@ models:
         endpoint_env: DASHSCOPE_WAN_ENDPOINT
         endpoint: ${DASHSCOPE_WAN_ENDPOINT}
 
+      seedream5_image_editor:
+        provider: volcengine_ark
+        model_name: ${SEEDREAM_IMAGE_MODEL:-doubao-seedream-5-0-pro-260628}
+        model_version: null
+        credential_ref: ark_seedream_generation
+        api_key_env: ARK_API_KEY
+        api_key_env_aliases:
+          - SEEDREAM_API_KEY
+        endpoint_env: SEEDREAM_BASE_URL
+        endpoint_env_aliases:
+          - SEEDREAM_ENDPOINT
+          - ARK_BASE_URL
+        endpoint: ${SEEDREAM_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+
       custom_i2i_generator:
         provider: custom
         model_name: replace_with_i2i_model
@@ -119,14 +212,14 @@ models:
     candidates:
       qwen397b_vlm_classifier:
         provider: openai_compatible
-        model_name: ${QWEN397B_MODEL:-aios-smart-eye-vlm}
+        model_name: ${QWEN397B_MODEL:-qwen3.6-27b}
         model_version: null
         classifier_type: vlm
-        classifier_name: aios-smart-eye-vlm
+        classifier_name: qwen3.6-27b
         classifier_version: external
         prompt_version: crop_industrial_safety_v2
         credential_ref: qwen_classifier
-        base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+        base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/v1}
 
       private_vlm_classifier:
         provider: custom
@@ -146,10 +239,10 @@ models:
         service_type: vlm_detector
         backend: vlm_labelstudio_detector
         geometry_source: detector
-        model_name: ${QWEN_GEOMETRY_MODEL:-aios-smart-eye-vlm}
+        model_name: ${QWEN_GEOMETRY_MODEL:-qwen3.6-27b}
         model_version: vlm-pre-annotation-v2
         credential_ref: qwen_geometry_vlm
-        base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+        base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/v1}
         temperature: 0.0
         max_tokens: 2000
         request_image_max_side: 1280
@@ -213,14 +306,21 @@ preprocess:
 
 generation:
   enabled: true
+  selector_key: mmseg_floor_selector
   vlm_model_key: qwen_grid_selector
-  image_model_key: wan_image_editor
+  image_model_key: seedream5_image_editor
   grid_layout: 4x4
   edit_bbox_expand_ratio: 0.2
-  crop_expand_ratio: 0.1
+  crop_expand_ratio: 0.03
   workers: 1
   skip_existing: true
   dry_run: false
+  seedream:
+    mode: null
+    water_reference_dir: null
+    red_box_max_size: 200
+    red_box_min_size: 200
+    allow_experimental_generation: false
 
 direct_annotation:
   enabled: true
@@ -406,3 +506,6 @@ export:
   export_format: labelstudio
   export_status: not_exported
   labelstudio_mapping: null
+  generated_quality_gate:
+    enabled: true
+    rejected_report: data/exports/labelstudio/rejected_generated_quality.json

@@ -4,11 +4,79 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .adapters.i2i_generator import iter_generated_metadata
 from .adapters.detector_service import load_detector_config
 from .exporters.labelstudio import export_metadata_dir
 from .model_config import build_detector_runtime_config
 from .modules.generation import build_generation_module
+from .modules.generation.preflight import run_generation_preflight
 from .pipeline import ingest_generated_metadata, run_direct_pipeline
+
+
+def configure_processed_root(config: dict[str, Any], processed_root: str | Path | None) -> dict[str, Any]:
+    if processed_root is None:
+        return config
+    root = Path(processed_root)
+    paths = config.setdefault("paths", {})
+    paths["metadata_dir"] = str(root / "metadata")
+    paths["crop_dir"] = str(root / "crops")
+    paths["i2i_output_dir"] = str(root / "i2i_outputs")
+    paths["export_dir"] = str(root / "exports")
+    paths["labelstudio_export"] = str(root / "exports" / "labelstudio" / "import.json")
+    export_cfg = config.setdefault("export", {})
+    quality_gate_cfg = export_cfg.get("generated_quality_gate")
+    if isinstance(quality_gate_cfg, dict):
+        quality_gate_cfg["rejected_report"] = str(root / "exports" / "labelstudio" / "rejected_generated_quality.json")
+    return config
+
+
+def apply_generation_run_overrides(
+    config: dict[str, Any],
+    *,
+    selector_key: str | None = None,
+    vlm_model_key: str | None = None,
+    image_model_key: str | None = None,
+    workers: int | None = None,
+    floor_python: str | None = None,
+    floor_checkpoint: str | None = None,
+    floor_device: str | None = None,
+    seedream_mode: str | None = None,
+    water_reference_dir: str | None = None,
+    red_box_max_size: int | None = None,
+    red_box_min_size: int | None = None,
+) -> dict[str, Any]:
+    generation_cfg = config.setdefault("generation", {})
+    if selector_key:
+        generation_cfg["selector_key"] = selector_key
+    if vlm_model_key:
+        generation_cfg["vlm_model_key"] = vlm_model_key
+        active_vlm = config.get("models", {}).get("generation", {}).get("active_vlm")
+        if selector_key is None and vlm_model_key != active_vlm:
+            generation_cfg["selector_key"] = "qwen_grid_selector"
+    if image_model_key:
+        generation_cfg["image_model_key"] = image_model_key
+    if workers is not None:
+        generation_cfg["workers"] = int(workers)
+    if any(value is not None for value in (floor_python, floor_checkpoint, floor_device)):
+        floor_cfg = generation_cfg.setdefault("floor_selector", {})
+        if floor_python is not None:
+            floor_cfg["python"] = str(floor_python)
+        if floor_checkpoint is not None:
+            floor_cfg["checkpoint"] = str(floor_checkpoint)
+        if floor_device is not None:
+            floor_cfg["device"] = str(floor_device)
+    if any(value is not None for value in (seedream_mode, water_reference_dir, red_box_max_size, red_box_min_size)):
+        seedream_cfg = generation_cfg.setdefault("seedream", {})
+        if seedream_mode is not None:
+            seedream_cfg["mode"] = seedream_mode
+            seedream_cfg["allow_experimental_generation"] = True
+        if water_reference_dir is not None:
+            seedream_cfg["water_reference_dir"] = str(water_reference_dir)
+        if red_box_max_size is not None:
+            seedream_cfg["red_box_max_size"] = int(red_box_max_size)
+        if red_box_min_size is not None:
+            seedream_cfg["red_box_min_size"] = int(red_box_min_size)
+    return config
 
 
 def default_manifest(config: dict[str, Any]) -> str:
@@ -32,14 +100,50 @@ def run_generation_branch(
     skip_existing: bool = False,
     limit: int | None = None,
     ingest_metadata: bool = True,
+    preflight: bool = False,
 ) -> int:
     paths = config.get("paths", {})
     generation_cfg = config.get("generation", {})
     module = build_generation_module(config)
     output_root = output_root or paths.get("i2i_output_dir") or "data/processed/i2i_outputs"
+    tasks_csv = tasks_csv or default_manifest(config)
+    image_root = image_root or default_image_root(config)
+    if preflight:
+        report = run_generation_preflight(
+            config,
+            tasks_csv=tasks_csv,
+            image_root=image_root,
+            output_root=output_root,
+            limit=limit,
+            require_credentials=not (dry_run or bool(generation_cfg.get("dry_run", False))),
+        )
+        if report.get("skipped"):
+            print(
+                f"Generation preflight: no generation rows found in {tasks_csv}; "
+                f"manifest_rows={report.get('manifest_rows', 0)}"
+            )
+        else:
+            model_pairs = [
+                f"{anomaly}:{runtime.get('selector_model_name')}->{runtime.get('image_model_name')}"
+                for anomaly, runtime in sorted((report.get("runtime_by_anomaly") or {}).items())
+            ]
+            print(
+                "Generation preflight: "
+                f"generation_rows={report.get('generation_rows')}, "
+                f"effective_rows={report.get('effective_generation_rows')}, "
+                f"anomaly_types={','.join(report.get('anomaly_types', []))}, "
+                f"models={';'.join(model_pairs)}, "
+                f"i2i_entrypoint={report.get('i2i_entrypoint')}"
+            )
+            if report.get("i2i_project_dir_env"):
+                print(
+                    "Generation preflight warning: "
+                    f"I2I_PROJECT_DIR is set to {report.get('i2i_project_dir_env')}; "
+                    "unset it to use the bundled external/I2I backend."
+                )
     result = module.run(
-        tasks_csv=tasks_csv or default_manifest(config),
-        image_root=image_root or default_image_root(config),
+        tasks_csv=tasks_csv,
+        image_root=image_root,
         output_root=output_root,
         dry_run=dry_run or bool(generation_cfg.get("dry_run", False)),
         skip_existing=skip_existing or bool(generation_cfg.get("skip_existing", False)),
@@ -53,9 +157,17 @@ def run_generation_branch(
         return result.returncode
     if getattr(result, "skipped", False):
         return 0
+    generated_count = len(iter_generated_metadata(output_root))
+    print(f"Generated metadata files found: {generated_count}")
     if ingest_metadata:
         metadata_dir = paths.get("metadata_dir", "data/processed/metadata")
-        written = ingest_generated_metadata(output_root, metadata_dir)
+        written = ingest_generated_metadata(
+            output_root,
+            metadata_dir,
+            pipeline_config=config,
+            tasks_csv=tasks_csv,
+            image_root=image_root,
+        )
         print(f"Ingested {len(written)} generated AutoLabelSample files into {metadata_dir}")
     return 0
 
@@ -105,8 +217,36 @@ def run_labelstudio_export(
     update_samples: bool = False,
 ) -> int:
     paths = config.get("paths", {})
+    export_cfg = config.get("export", {}) if isinstance(config.get("export"), dict) else {}
+    quality_gate_cfg = (
+        export_cfg.get("generated_quality_gate", {})
+        if isinstance(export_cfg.get("generated_quality_gate"), dict)
+        else {}
+    )
+    generated_quality_gate = bool(quality_gate_cfg.get("enabled", False))
+    rejected_report_path = quality_gate_cfg.get("rejected_report")
     metadata_dir = metadata_dir or paths.get("metadata_dir", "data/processed/metadata")
     output_path = output_path or paths.get("labelstudio_export", "data/exports/labelstudio/import.json")
-    tasks = export_metadata_dir(metadata_dir, output_path, update_samples=update_samples)
+    tasks = export_metadata_dir(
+        metadata_dir,
+        output_path,
+        update_samples=update_samples,
+        generated_quality_gate=generated_quality_gate,
+        rejected_report_path=rejected_report_path,
+    )
     print(f"Wrote {len(tasks)} Label Studio tasks to {output_path}")
+    if generated_quality_gate:
+        report_path = rejected_report_path or Path(output_path).with_name("rejected_generated_quality.json")
+        try:
+            from .utils import read_json
+
+            report = read_json(report_path)
+            print(
+                "Export quality gate: "
+                f"generated={report.get('generated_samples', 0)}, "
+                f"exportable={report.get('exported_generated_samples', 0)}, "
+                f"rejected={report.get('rejected_samples', 0)}"
+            )
+        except Exception:
+            print(f"Export quality gate report path: {report_path}")
     return 0

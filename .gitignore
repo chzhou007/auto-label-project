@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+.DS_Store
+__MACOSX/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -17,6 +19,9 @@ data/processed/i2i_outputs/*
 data/exports/*
 data/qc/*
 data/runs/*
+external/I2I/outputs/
+external/I2I/data/images/*
+external/I2I/data/prompts/*
 
 !data/raw/images/.gitkeep
 !data/raw/videos/.gitkeep
@@ -26,3 +31,10 @@ data/runs/*
 !data/processed/metadata/.gitkeep
 !data/exports/labelstudio/.gitkeep
 !data/qc/.gitkeep
+!external/.gitkeep
+!external/I2I/data/
+!external/I2I/data/.gitkeep
+!external/I2I/data/images/
+!external/I2I/data/images/.gitkeep
+!external/I2I/data/prompts/
+!external/I2I/data/prompts/.gitkeep

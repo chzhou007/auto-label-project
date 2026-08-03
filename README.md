@@ -21,7 +21,7 @@
   │    └─ 调用 classification.py 做多标签分类
   │
   └─ 图像生成任务
-       ├─ 调用 C:\Users\chang\Documents\数据标注\I2I
+       ├─ 调用 external/I2I
        ├─ 接收生成图自带框坐标
        └─ 使用生成任务自带分类信息，跳过 classification.py
         ↓
@@ -103,13 +103,15 @@ python -m pip install -r requirements.txt
 
 ```powershell
 $env:QWEN397B_API_KEY="你的大模型 Key"
-$env:QWEN397B_API_URL="https://deepseek.gds-services.com/vllm-qwen35b/v1"
-$env:QWEN_GEOMETRY_API_URL="https://deepseek.gds-services.com/vllm-qwen35b/v1"
-$env:QWEN397B_MODEL="aios-smart-eye-vlm"
-$env:QWEN_GEOMETRY_MODEL="aios-smart-eye-vlm"
+$env:QWEN397B_API_URL="https://deepseek.gds-services.com/v1"
+$env:QWEN_GEOMETRY_API_URL="https://deepseek.gds-services.com/v1"
+$env:QWEN397B_MODEL="qwen3.6-27b"
+$env:QWEN_GEOMETRY_MODEL="qwen3.6-27b"
+$env:QWEN_GRID_SELECTOR_MODEL="qwen3.6-27b"
 
 # 只有运行 I2I 生成分支时才需要配置生成模型 key：
-$env:DASHSCOPE_API_KEY="你的 DashScope Key"
+$env:ARK_API_KEY="你的 Ark/Seedream Key"
+$env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
 ```
 
 如需本地私有配置，可以复制：
@@ -138,14 +140,14 @@ credentials:
   qwen_classifier:
     api_key_env: QWEN397B_API_KEY
     api_key: ${QWEN397B_API_KEY}
-    base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+    base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/v1}
   qwen_geometry_vlm:
     api_key_env: QWEN397B_API_KEY
     api_key: ${QWEN397B_API_KEY}
-    base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+    base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/v1}
 
 paths:
-  i2i_project: C:\Users\chang\Documents\数据标注\I2I
+  i2i_project: ${I2I_PROJECT_DIR:-external/I2I}
   classification_script: scripts/classification.py
   raw_images_dir: data/raw/images
   raw_videos_dir: data/raw/videos
@@ -156,10 +158,13 @@ paths:
 
 modules:
   generation:
-    backend: i2i_external
+    backend: vlm_wan_autolabel
     backends:
       i2i_external:
-        project_dir: C:\Users\chang\Documents\数据标注\I2I
+        project_dir: ${I2I_PROJECT_DIR:-external/I2I}
+      vlm_wan_autolabel:
+        project_dir: ${I2I_PROJECT_DIR:-external/I2I}
+        pass_localizer_cli_args: false
   classification:
     backend: external_script
     backends:
@@ -169,7 +174,7 @@ modules:
 models:
   generation:
     active_vlm: qwen_grid_selector
-    active_image_generator: wan_image_editor
+    active_image_generator: seedream5_image_editor
   classification:
     active_model: qwen397b_vlm_classifier
   geometry:
@@ -239,10 +244,11 @@ powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 -DryRunModels
 
 ```powershell
 $env:QWEN397B_API_KEY="你的 key"
-$env:QWEN397B_API_URL="https://deepseek.gds-services.com/vllm-qwen35b/v1"
-$env:QWEN_GEOMETRY_API_URL="https://deepseek.gds-services.com/vllm-qwen35b/v1"
-$env:QWEN_GEOMETRY_MODEL="aios-smart-eye-vlm"
-$env:QWEN397B_MODEL="aios-smart-eye-vlm"
+$env:QWEN397B_API_URL="https://deepseek.gds-services.com/v1"
+$env:QWEN_GEOMETRY_API_URL="https://deepseek.gds-services.com/v1"
+$env:QWEN_GEOMETRY_MODEL="qwen3.6-27b"
+$env:QWEN397B_MODEL="qwen3.6-27b"
+$env:QWEN_GRID_SELECTOR_MODEL="qwen3.6-27b"
 
 powershell -ExecutionPolicy Bypass -File scripts/run_batch.ps1 -BatchName batch_001
 ```
@@ -416,7 +422,7 @@ sample_002,img_002,data/staging/image_sequence/img_002.jpg,generated,generation,
 图像生成分支使用外部代码：
 
 ```text
-C:\Users\chang\Documents\数据标注\I2I
+external/I2I
 ```
 
 运行命令：
@@ -445,11 +451,11 @@ task_mode=generation
 models:
   generation:
     active_vlm: qwen_grid_selector
-    active_image_generator: wan_image_editor
+    active_image_generator: seedream5_image_editor
 
 generation:
   vlm_model_key: qwen_grid_selector
-  image_model_key: wan_image_editor
+  image_model_key: seedream5_image_editor
 ```
 
 要换模型时，新增一个 `models.generation.vlm` 或 `models.generation.image_generators` 条目，再把 active/key 改过去即可。
@@ -565,9 +571,9 @@ models:
         service_type: vlm_detector
         backend: vlm_labelstudio_detector
         geometry_source: detector
-        model_name: ${QWEN_GEOMETRY_MODEL:-aios-smart-eye-vlm}
+        model_name: ${QWEN_GEOMETRY_MODEL:-qwen3.6-27b}
         credential_ref: qwen_geometry_vlm
-        base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+        base_url: ${QWEN_GEOMETRY_API_URL:-https://deepseek.gds-services.com/v1}
         request_image_max_side: 1280
         coordinate_units: auto
         auto_detect_coordinate_units: true
@@ -761,11 +767,11 @@ models:
     candidates:
       qwen397b_vlm_classifier:
         provider: openai_compatible
-        model_name: ${QWEN397B_MODEL:-aios-smart-eye-vlm}
+        model_name: ${QWEN397B_MODEL:-qwen3.6-27b}
         classifier_type: vlm
         classifier_name: qwen397b_vlm_classifier
         credential_ref: qwen_classifier
-        base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/vllm-qwen35b/v1}
+        base_url: ${QWEN397B_API_URL:-https://deepseek.gds-services.com/v1}
 
 classification:
   enabled: true
@@ -900,10 +906,18 @@ python scripts/export_labelstudio.py --config configs/autolabel.yaml --update-sa
 运行基础测试：
 
 ```powershell
-python -m unittest discover -s tests
+python -m pytest tests -q
 ```
 
 运行 Python 编译检查：
+
+```powershell
+python -m pytest tests/generation -q
+```
+
+```text
+2026-07-01 baseline: 78 passed
+```
 
 ```powershell
 python -m compileall autolabel scripts tests
@@ -952,5 +966,491 @@ anomaly_type
 ```
 
 ### 5. 生成图为什么没有再分类
+
+## 17. I2I / PGCD Localizer
+
+### 17.0 Current Version Quick Start
+
+This section is the authoritative usage guide for the current `I2I + localizer` implementation.
+
+Current behavior:
+
+1. The external I2I project generates edited images.
+2. This repository ingests generated metadata and runs localizer postprocess during ingest.
+3. The ingest step writes `final_bbox`, `mask`, `crop`, benchmark logs, and audit logs.
+
+Supported localizers:
+
+- `rgb_diff`
+- `pgcd_lpips`
+- `pgcd_lpips_sam2`
+
+Recommended entrypoints:
+
+- `python scripts/run_pipeline.py --config configs/autolabel.yaml --branches generation`
+- `python scripts/run_i2i_generation.py --pipeline-config configs/autolabel.yaml --ingest-metadata-dir data/processed/metadata`
+- `python -m autolabel.modules.generation.main ...` for temporary CLI overrides such as `--localizer`, `--benchmark`, and `--sam2-enabled`
+
+### 17.1 Preconditions
+
+Before running this version, make sure:
+
+1. The bundled I2I backend is available at `external/I2I`. Set `${I2I_PROJECT_DIR}` only when you intentionally want to use another checkout.
+2. Your manifest rows for generation include `task_mode=generation` and `anomaly_type`.
+3. The required model credentials are set in environment variables or config.
+4. Dependencies are installed:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+On Windows, if you intentionally keep I2I outside this repository:
+
+```powershell
+$env:I2I_PROJECT_DIR="C:\path\to\I2I"
+```
+
+After migrating to the bundled backend, remove an old override before running:
+
+```powershell
+Remove-Item Env:I2I_PROJECT_DIR -ErrorAction SilentlyContinue
+```
+
+The localizer configuration is applied during metadata ingest in this repository. It is not passed to the external I2I CLI unless `modules.generation.backends.<backend>.pass_localizer_cli_args: true` is set for a newer compatible I2I entrypoint.
+
+### 17.2 Recommended Production Command
+
+Run the generation branch through the unified DAG entrypoint:
+
+```powershell
+python scripts/run_pipeline.py `
+  --config configs/autolabel.yaml `
+  --branches generation
+```
+
+This command:
+
+- calls the external I2I backend
+- ingests generated metadata into `data/processed/metadata`
+- runs localizer postprocess during ingest
+- writes benchmark and audit outputs when `modules.generation.localizer.benchmark: true`
+
+For batch generation, put all rows in `data/staging/image_sequence/manifest.csv` and increase `generation.workers` in `configs/autolabel.yaml` when the upstream API quota can handle parallel requests.
+
+### 17.3 Generation-Only Script
+
+If you want to run only the generation branch script:
+
+```powershell
+python scripts/run_i2i_generation.py `
+  --pipeline-config configs/autolabel.yaml `
+  --ingest-metadata-dir data/processed/metadata
+```
+
+Use this when you want to override only `--tasks`, `--image-root`, or `--output-root`.
+This script is config-driven and does not expose localizer override flags on the command line.
+
+### 17.4 Localizer Debug / Override CLI
+
+For temporary localizer overrides, benchmark runs, and SAM2 experiments, use:
+
+```powershell
+python -m autolabel.modules.generation.main `
+  --config configs/autolabel.yaml `
+  --tasks data/staging/image_sequence/manifest.csv `
+  --image-root data/staging/image_sequence `
+  --output-root data/processed/i2i_outputs `
+  --localizer pgcd_lpips `
+  --localizer-fallback rgb_diff `
+  --benchmark
+```
+
+Common flags:
+
+- `--localizer rgb_diff|pgcd_lpips|pgcd_lpips_sam2`
+- `--localizer-fallback rgb_diff|none`
+- `--localizer-debug`
+- `--localizer-sidecar-eval pgcd_lpips,pgcd_lpips_sam2`
+- `--benchmark`
+- `--sam2-enabled --sam2-model tiny|small|base`
+- `--no-ingest-generated`
+
+### 17.5 Common Run Modes
+
+Stable production mode:
+
+```powershell
+python scripts/run_pipeline.py --config configs/autolabel.yaml --branches generation
+```
+
+`rgb_diff` main output with PGCD and SAM2 sidecar evaluation:
+
+```powershell
+python -m autolabel.modules.generation.main `
+  --config configs/autolabel.yaml `
+  --localizer rgb_diff `
+  --localizer-sidecar-eval pgcd_lpips,pgcd_lpips_sam2 `
+  --benchmark
+```
+
+Gray rollout for PGCD with RGB diff fallback:
+
+```powershell
+python -m autolabel.modules.generation.main `
+  --config configs/autolabel.yaml `
+  --localizer pgcd_lpips `
+  --localizer-fallback rgb_diff `
+  --benchmark
+```
+
+SAM2 experiment:
+
+```powershell
+python -m autolabel.modules.generation.main `
+  --config configs/autolabel.yaml `
+  --localizer pgcd_lpips_sam2 `
+  --sam2-enabled `
+  --sam2-model tiny `
+  --benchmark
+```
+
+Seedream5.0 water leak calibration and production:
+
+```powershell
+$env:ARK_API_KEY="..."
+$env:SEEDREAM_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
+$env:SEEDREAM_IMAGE_MODEL="doubao-seedream-5-0-pro-260628"
+$env:WATER_LEAK_REFERENCE_DIR="D:\datasets\water_leak_refs"
+$env:MMSEG_FLOOR_PYTHON="D:\envs\openmmlab310\python.exe"
+$env:MMSEG_FLOOR_CHECKPOINT="D:\models\best_mIoU_iter_3000.pth"
+$env:MMSEG_FLOOR_DEVICE="cuda:0"
+
+python scripts/prepare_water_leak_manifest.py `
+  --input data/staging/image_sequence/manifest.csv `
+  --output data/staging/image_sequence/water_leak_generation_1000.csv `
+  --count 1000
+
+python scripts/run_pipeline.py `
+  --config configs/autolabel.yaml `
+  --branches generation,export `
+  --manifest data/staging/image_sequence/water_leak_generation_1000.csv `
+  --processed-root data/runs/water_leak_seedream5_calibration `
+  --generation-selector-key mmseg_floor_selector `
+  --generation-image-model-key seedream5_image_editor `
+  --generation-seedream-mode boxed_fusion `
+  --generation-water-reference-dir $env:WATER_LEAK_REFERENCE_DIR `
+  --generation-red-box-max-size 200 `
+  --generation-red-box-min-size 200 `
+  --generation-workers 1 `
+  --generation-limit 50 `
+  --skip-existing-generation
+
+python scripts/run_pipeline.py `
+  --config configs/autolabel.yaml `
+  --branches generation,export `
+  --manifest data/staging/image_sequence/water_leak_generation_1000.csv `
+  --processed-root data/runs/water_leak_seedream5_1000 `
+  --generation-selector-key mmseg_floor_selector `
+  --generation-image-model-key seedream5_image_editor `
+  --generation-seedream-mode boxed_fusion `
+  --generation-water-reference-dir $env:WATER_LEAK_REFERENCE_DIR `
+  --generation-red-box-max-size 200 `
+  --generation-red-box-min-size 200 `
+  --generation-workers 1 `
+  --generation-limit 1000 `
+  --skip-existing-generation
+```
+
+`boxed_fusion` is the recommended Seedream experiment for water leak generation. Before any Seedream call, the dedicated MMSeg Python environment loads the SegFormer checkpoint once and segments every runnable image. Only class `road=2` is eligible for the deterministic 200x200 guide box; `line=1` and `background=0` are excluded. Images without a qualifying floor region are recorded as `no_visible_floor_region` and do not consume a Seedream request.
+
+The MMSeg runtime is intentionally separate from the main Python 3.12 pipeline. `MMSEG_FLOOR_PYTHON` must point to a Python 3.10 environment with the versions used to train the model (Torch 2.1, MMCV 2.1, MMEngine 0.10, MMSegmentation 1.2). `MMSEG_FLOOR_CHECKPOINT` must point to the trained three-class SegFormer checkpoint; do not use a generic Cityscapes PSPNet checkpoint.
+
+Floor debug artifacts are written under `i2i_outputs/debug/floor_masks` and `i2i_outputs/debug/floor_overlays`. The final bbox and crop still come from the Seedream raw-vs-original water mask, not from the 200x200 guide box. The water mask must overlap the segmented floor or the sample is rejected.
+
+For a single-image coordinate edit comparison, use:
+
+```powershell
+$env:SEEDREAM_SINGLE_IMAGE_MODEL="doubao-seedream-5-0-pro-260628"
+
+python scripts/run_pipeline.py `
+  --config configs/autolabel.yaml `
+  --branches generation,export `
+  --manifest data/staging/image_sequence/water_leak_generation_1000.csv `
+  --processed-root data/runs/water_leak_seedream5_boxed_single_calibration `
+  --generation-selector-key mmseg_floor_selector `
+  --generation-image-model-key seedream5_image_editor `
+  --generation-seedream-mode boxed_single_edit `
+  --generation-red-box-max-size 200 `
+  --generation-red-box-min-size 200 `
+  --generation-workers 1 `
+  --generation-limit 50 `
+  --skip-existing-generation
+```
+
+The export branch keeps direct samples unchanged, but generated samples are exported only when every generated object has `localizer.postprocess_status=success` and `quality.passes_quality=true`. Rejected generated samples are written to `exports/labelstudio/rejected_generated_quality.json` under the selected `--processed-root`.
+
+The default config now routes image generation through `seedream5_image_editor`. The explicit `--generation-image-model-key seedream5_image_editor` in the commands above is intentional documentation of the production model, not a required override.
+
+Because Seedream image generation is not a proven local edit/inpaint endpoint, the pipeline rejects it unless you explicitly choose `--generation-seedream-mode single_image_edit`, `--generation-seedream-mode boxed_single_edit`, or `--generation-seedream-mode boxed_fusion`. Without that explicit experiment mode, Seedream reference generation is not allowed for production local editing.
+
+Generation selection and image generation are separate stages:
+
+- `--generation-selector-key mmseg_floor_selector` selects the local floor segmentation prepass for water leaks.
+- `--generation-image-model-key` selects the image editing profile.
+
+The default water-leak selector is `mmseg_floor_selector`, so Qwen credentials are not required for this generation path. The legacy `--generation-vlm-model-key` remains available when explicitly switching back to `qwen_grid_selector` for another anomaly type, but it is not a floor-selection fallback.
+
+Important external I2I compatibility note:
+
+- This repository passes the selector backend, selector model, MMSeg runtime paths, and image model into the bundled external I2I process.
+- Water-leak MMSeg selection reads `MMSEG_FLOOR_PYTHON`, `MMSEG_FLOOR_CHECKPOINT`, and `MMSEG_FLOOR_DEVICE`; Seedream reads `ARK_API_KEY` and `SEEDREAM_BASE_URL`.
+- If you point `I2I_PROJECT_DIR` at an older external I2I checkout, the repo CLI may show the intended model chain in preflight while the old I2I client still calls DashScope endpoints.
+
+For current production runs, read the preflight line before spending API quota. It prints the effective model chain as:
+
+```text
+models=water_leak:<selector_model_name>-><image_model_name>
+```
+
+### 17.6 Cabinet Door Open Batch
+
+Cabinet-door generation uses the existing door-segmentation/classification results and does not enter the leak, grid, floor-MMSeg, red-box, or water-mask pipeline:
+
+1. `candidate_predictions.csv` supplies segmented door polygons plus closed/open and not-door classifier probabilities. The selector derives a tight bbox from `polygon_json`; the CSV crop bbox is intentionally not used when a valid polygon exists. `image_predictions.csv` supplies the room type.
+2. The default selector keeps one compact, low-texture, high-confidence closed door in an electrical room. The default room allowlist is `高压配电室|低压配电室|发电机配电房`, which excludes module rooms, carrier access rooms, weak-current rooms, and server-rack-heavy scenes. Merged cabinet-bank masks above 10% of the image and high-texture rack/shelf candidates are rejected.
+3. The selected door bbox is expanded into a context crop with space on both sides for the door swing. Seedream Pro receives this crop once, with the door bbox converted into crop-local coordinates. It never regenerates the full source image and nothing is pasted back into the source.
+4. Accepted results are written as size-aligned classification pairs. `close` is the untouched context crop and `open` is the quality-passed Seedream crop. Metadata preserves the original-image door bbox, the context-crop bbox in original coordinates, and the door bbox in crop-local coordinates.
+5. The default path makes zero Qwen/VLM calls and one Seedream call per selected image.
+
+```powershell
+$env:ARK_API_KEY = "<ark-api-key>"
+
+python scripts/generate_cabinet_door_open.py `
+  --image-dir "D:\codex\datacenter-door-seg\runs\inference\0730_cascade_v5_mask_dedup_LF20A1_full_20260727\false_positive_originals_dedup_190" `
+  --output-root "D:\codex\datacenter-door-seg\runs\generation\0730_seg_seedream_electrical_cabinet_open" `
+  --selector-backend segmentation_candidates `
+  --candidate-predictions-csv "D:\codex\datacenter-door-seg\runs\inference\0730_cascade_v5_mask_dedup_LF20A1_full_20260727\candidate_predictions.csv" `
+  --image-predictions-csv "D:\codex\datacenter-door-seg\runs\inference\0730_cascade_v5_mask_dedup_LF20A1_full_20260727\image_predictions.csv" `
+  --image-model doubao-seedream-5-0-pro-260628 `
+  --limit 5 `
+  --workers 1 `
+  --skip-existing
+```
+
+For the segmentation backend, `--limit 5` means five eligible segmented closed doors, not the first five source files. Remove the limit after reviewing the smoke test. The complete selector audit is written to `logs/segmentation_selections.jsonl`.
+
+The paired dataset layout is:
+
+```text
+pairs/
+  close/                 # untouched closed-door context crops
+  open/                  # size-aligned Seedream open-door context crops
+  annotations/           # source bbox, context bbox, crop-local bbox, classifier scores
+  manifest.csv           # one row per close/open pair
+```
+
+`debug/selection_overlays` shows the segmentation bbox on the source image. `debug/seedream_input_crops` contains the exact close crop sent to Seedream, and `debug/seedream_raw_outputs` keeps the model response before size normalization. Background-drift failures are retained under `debug/failed_generated_images`; exact selector and Seedream call counts are written to `logs/run_summary.json`. `generated_images` is not used by this classification-pair workflow.
+
+The legacy visual selector remains available only for compatibility with `--selector-backend vlm`. It is not a fallback for the segmentation path. Seedream uses the OpenAI Python SDK when installed and otherwise sends the same payload directly to Ark `/api/v3/images/generations` through `requests`.
+
+To prioritize a manually reviewed directory, pass it as a filename list instead of using its annotated images as model inputs. The command below processes only clean source images whose names occur under `按结果复核\有开门`:
+
+```powershell
+$env:ARK_API_KEY = "<ark-api-key>"
+
+python scripts/generate_cabinet_door_open.py `
+  --image-dir "C:\Users\chang\Downloads\LF20A1_设备柜门箱门异常识别_全量_20260727_163917\LF20A1_设备柜门箱门异常识别_全量_20260727_163917\images" `
+  --output-root "D:\codex\datacenter-door-seg\runs\generation\0729_reviewed_equipment_cabinet_open_crop" `
+  --priority-image-dir "D:\codex\datacenter-door-seg\runs\inference\0729_cascade_v3_lf20a1_fp_LF20A1_full_20260727\按结果复核\有开门" `
+  --priority-only `
+  --reviewed-all-close `
+  --selector-backend segmentation_candidates `
+  --candidate-predictions-csv "D:\codex\datacenter-door-seg\runs\inference\0729_cascade_v3_lf20a1_fp_LF20A1_full_20260727\candidate_predictions.csv" `
+  --image-predictions-csv "D:\codex\datacenter-door-seg\runs\inference\0729_cascade_v3_lf20a1_fp_LF20A1_full_20260727\image_predictions.csv" `
+  --image-model doubao-seedream-5-0-pro-260628 `
+  --workers 1 `
+  --skip-existing
+```
+
+Replace `<ark-api-key>` with the actual ASCII Ark key. The batch preflight rejects copied placeholders or non-ASCII values before any image request is attempted.
+
+`--reviewed-all-close` is a manual ground-truth override for this specific false-positive set: every reviewed image is treated as close, and the candidate that triggered `fused_open` or `passed_state_gate` is used as the generation target. It bypasses model open-state, room-type, cabinet-type, texture, area, and not-door gates so all 198 reviewed images can produce one candidate pair. Without this flag, the normal conservative room, appearance, and existing-open-overlap gates remain active.
+
+### 17.7 Recommended Config
+
+The current recommended config block is:
+
+```yaml
+modules:
+  generation:
+    backend: vlm_wan_autolabel
+    localizer:
+      primary: pgcd_lpips
+      fallback: rgb_diff
+      benchmark: true
+      debug: false
+      allow_quality_fallback: true
+      sidecar_eval: null
+      pgcd:
+        threshold: otsu
+        min_component_area: 300
+        max_global_change_ratio: 0.25
+        prompt_prior_weights:
+          area: 0.30
+          lpips: 0.40
+          iou: 0.20
+          distance: 0.10
+      sam2:
+        enabled: false
+        model: tiny
+    localizer_policy:
+      water_leak:
+        primary: pgcd_lpips
+        fallback: rgb_diff
+      coolant_leak:
+        primary: pgcd_lpips
+        fallback: rgb_diff
+      diesel_leak:
+        primary: rgb_diff
+        fallback: pgcd_lpips
+      oil_leak:
+        primary: rgb_diff
+        fallback: pgcd_lpips
+```
+
+### 17.7 Outputs
+
+Main output locations:
+
+```text
+data/processed/i2i_outputs/
+data/processed/metadata/
+data/processed/masks/
+data/processed/crops/
+data/processed/metadata/api_responses/
+data/processed/metadata/debug/
+data/processed/metadata/logs/
+```
+
+Typical benchmark and audit files:
+
+```text
+localizer_benchmark_*.json
+localizer_benchmark_*.csv
+localizer_benchmark_*_summary.json
+localizer_failure_summary_*.json
+audit_sample_list_*.csv
+```
+
+### 17.8 Metadata Notes
+
+`objects[].geometry_detail.generation_params.localizer` now records:
+
+- `strategy`
+- `primary`
+- `fallback`
+- `used`
+- `fallback_used`
+- `fallback_trigger`
+- `reason`
+- `metrics`
+- `benchmark`
+- `quality`
+- `attempts`
+- `debug_artifacts`
+- `sidecars`
+
+Artifact paths such as `mask_uri`, `crop_uri`, `wan_response_path`, and `pgcd_heatmap_path` are written as relative paths when possible.
+
+### 17.9 Operational Notes
+
+- `run_pipeline.py` and `run_i2i_generation.py` are YAML-driven; use the module CLI only when you need temporary localizer overrides.
+- `manual_accept_rate` becomes meaningful only after manual review data is filled back into the audit workflow.
+- If `modules.generation.localizer.benchmark: false`, ingest will skip benchmark and audit output generation.
+- If SAM2 is unavailable, `pgcd_lpips_sam2` falls back to coarse PGCD behavior instead of breaking the main flow.
+
+2026-07 supplement:
+- LPIPS roadmap dependencies are now declared in both `requirements.txt` and `pyproject.toml`: `torch`, `torchvision`, `lpips`.
+- `allow_quality_fallback` is supported during metadata ingest. If the primary localizer succeeds but fails the quality gate, the configured fallback localizer can take over.
+- `sidecar_eval` now supports one localizer, a comma-separated list such as `pgcd_lpips,pgcd_lpips_sam2`, or a YAML list.
+- Benchmark rows now carry real `bbox_iou`, `precision`, `recall`, `mask_iou`, `fallback_rate`, and `quality_pass_rate` signals instead of fixed zero values.
+- Localizer metadata now records `benchmark`, `quality`, and `attempts`, and benchmark logs additionally emit `localizer_failure_summary_*.json`.
+- Localizer CLI flags are repository-local ingest settings by default. They are not forwarded to the external I2I CLI unless `pass_localizer_cli_args: true` is explicitly enabled for a compatible backend.
+
+当前 generation 分支已经接入路线文档中的 localizer 架构。默认 backend 为 `vlm_wan_autolabel`，它仍复用现有 I2I 项目完成生成，但会在 metadata ingest 阶段执行仓库内的 localizer 后处理，并输出 benchmark 与 audit 产物。
+
+推荐配置示例：
+
+```yaml
+modules:
+  generation:
+    backend: vlm_wan_autolabel
+    localizer:
+      primary: pgcd_lpips
+      fallback: rgb_diff
+      debug: false
+      sidecar_eval: null
+      pgcd:
+        threshold: otsu
+        min_component_area: 300
+        max_global_change_ratio: 0.25
+        lpips_backbone: alex
+        lpips_input_max_side: 768
+        heatmap_normalization: percentile
+        heatmap_percentile_low: 1
+        heatmap_percentile_high: 99
+        prompt_prior_weights:
+          area: 0.30
+          lpips: 0.40
+          iou: 0.20
+          distance: 0.10
+      sam2:
+        enabled: false
+        model: tiny
+    localizer_policy:
+      water_leak:
+        primary: pgcd_lpips
+        fallback: rgb_diff
+      coolant_leak:
+        primary: pgcd_lpips
+        fallback: rgb_diff
+      diesel_leak:
+        primary: rgb_diff
+        fallback: pgcd_lpips
+      oil_leak:
+        primary: rgb_diff
+        fallback: pgcd_lpips
+```
+
+当前实现说明：
+
+- `rgb_diff` 仍保留为 baseline 和 fallback。
+- `pgcd_lpips` 会优先使用可选的 `lpips + torch` 计算 perceptual heatmap；如果当前环境未安装这些依赖，会自动降级为 RGB-diff heatmap，并在 metadata metrics 中记录 `pgcd_heatmap_backend`。
+- `pgcd_lpips_sam2` 是可选增强；如果没有可用的 SAM2 refiner，不会阻断主流程，而是回退到 coarse PGCD 结果。
+- `sidecar_eval` 可以让主输出继续使用一个 localizer，同时把另一个 localizer 的结果写入 benchmark，不影响最终 metadata。
+
+localizer 后处理会把以下信息写回 `objects[].geometry_detail.generation_params.localizer`：
+
+- `strategy` / `fallback` / `used`
+- `fallback_used` / `reason`
+- `metrics`
+- `debug_artifacts`
+- `sidecar`
+
+benchmark 与抽检输出目录：
+
+```text
+data/processed/metadata/logs/
+  localizer_benchmark_*.json
+  localizer_benchmark_*.csv
+  localizer_benchmark_*_summary.json
+  localizer_benchmark_*_failures.json
+  audit_sample_list_*.csv
+```
+
+补充说明：
+
+- `lpips`、`torch`、`torchvision`、`sam2` 都属于可选增强依赖，不是基础运行必需项。
+- 如果只需要稳定跑通主流程，当前默认配置已经可以在缺失这些依赖时自动回退。
 
 这是当前设计：生成图自带框坐标和原始分类信息，因此跳过 `classification.py`，避免重复调用大模型。

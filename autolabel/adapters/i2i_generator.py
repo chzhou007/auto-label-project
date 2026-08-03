@@ -12,7 +12,7 @@ from ..validators import validate_sample_contract
 
 class I2IGenerator:
     def __init__(self, i2i_project: str | Path) -> None:
-        self.i2i_project = Path(i2i_project)
+        self.i2i_project = Path(i2i_project).resolve()
 
     @property
     def main_py(self) -> Path:
@@ -23,16 +23,17 @@ class I2IGenerator:
         tasks_csv: str | Path,
         image_root: str | Path,
         output_root: str | Path,
-        vlm_model: str = "aios-smart-eye-vlm",
-        image_model: str = "wan2.7-image-pro",
+        vlm_model: str = "qwen3.6-27b",
+        image_model: str = "doubao-seedream-5.0-lite",
         grid_layout: str = "4x4",
         edit_bbox_expand_ratio: float = 0.20,
-        crop_expand_ratio: float = 0.10,
+        crop_expand_ratio: float = 0.03,
         workers: int = 1,
         dry_run: bool = False,
         skip_existing: bool = False,
         limit: int | None = None,
         env: dict[str, str] | None = None,
+        extra_cli_args: list[str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         if not self.main_py.exists():
             raise FileNotFoundError(f"I2I entrypoint not found: {self.main_py}")
@@ -65,6 +66,8 @@ class I2IGenerator:
             cmd.append("--skip-existing")
         if limit is not None:
             cmd.extend(["--limit", str(limit)])
+        if extra_cli_args:
+            cmd.extend([str(arg) for arg in extra_cli_args if str(arg)])
 
         subprocess_env = os.environ.copy()
         if env:
